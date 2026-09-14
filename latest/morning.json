@@ -4,8 +4,8 @@
   "purpose": "delivery_test_not_investment_advice",
   "stage": "morning",
   "execution_mode": "manual_replay",
-  "requested_at": "2026-09-15T00:25:13.635032+08:00",
-  "generated_at": "2026-09-15T00:25:16.073693+08:00",
+  "requested_at": "2026-09-15T04:51:01.725023+08:00",
+  "generated_at": "2026-09-15T04:51:03.556732+08:00",
   "scheduled_for": "2026-09-15T09:00:00+08:00",
   "timing_status": "manual_replay",
   "coverage": {
