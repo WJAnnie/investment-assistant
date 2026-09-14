@@ -1,0 +1,436 @@
+"""Credential-free public observations and explicitly synthetic delivery tests.
+
+This is not the private-account exporter or the trading engine. Only the
+notify command imports a notifier or reads notification credentials.
+"""
+import argparse
+from datetime import datetime, timedelta, timezone
+import json
+import math
+import os
+from pathlib import Path
+import re
+import stat
+import tempfile
+from urllib.parse import urlsplit
+
+import requests
+
+from app.market.sina import SinaProvider
+
+
+SHANGHAI = timezone(timedelta(hours=8))
+STAGES = {'morning': '09:00', 'midday': '11:30', 'decision': '14:30', 'closing': '16:10'}
+PUBLIC_SYMBOLS = {
+    'SH.000001': '上证指数', 'SZ.399001': '深证成指',
+    'SZ.399006': '创业板指', 'SH.000688': '科创50',
+    'SH.000905': '中证500', 'SH.000300': '沪深300',
+    'SH.000016': '上证50', 'SZ.399005': '中小100',
+}
+SCHEMA_VERSION = 'public-trial/v1'
+DATA_CLASSIFICATION = 'public_market_and_synthetic_test'
+_ERRORS = {'NO_QUOTE', 'PROVIDER_UNAVAILABLE', 'INVALID_QUOTE'}
+_TITLES = {'morning': '晨报', 'midday': '午盘变化', 'decision': '核心决策', 'closing': '收盘复盘'}
+
+
+def _invalid():
+    # Never embed a caller's payload, endpoint or provider exception.
+    raise ValueError('INVALID_PUBLIC_TRIAL') from None
+
+
+def _now():
+    return datetime.now(SHANGHAI)
+
+
+def _local_time(value):
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        _invalid()
+    return value.astimezone(SHANGHAI)
+
+
+def _parse_time(value):
+    if type(value) is not str or len(value) > 40:
+        _invalid()
+    try:
+        result = _local_time(datetime.fromisoformat(value))
+    except (ValueError, TypeError, OverflowError):
+        _invalid()
+    if result.isoformat() != value:
+        _invalid()
+    return result
+
+
+def _metadata(stage, requested_at, generated_at, execution_mode):
+    if type(stage) is not str or stage not in STAGES:
+        _invalid()
+    if execution_mode not in ('manual_replay', 'scheduled'):
+        _invalid()
+    requested_at, generated_at = _local_time(requested_at), _local_time(generated_at)
+    if generated_at < requested_at:
+        _invalid()
+    hour, minute = (int(part) for part in STAGES[stage].split(':'))
+    slot = requested_at.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if execution_mode == 'manual_replay':
+        timing = 'manual_replay'
+    elif requested_at.weekday() >= 5:
+        timing = 'non_weekday'
+    elif requested_at < slot:
+        timing = 'early'
+    elif generated_at > slot + timedelta(minutes=15):
+        timing = 'late'
+    else:
+        timing = 'on_time'
+    return {
+        'schema_version': SCHEMA_VERSION, 'data_classification': DATA_CLASSIFICATION,
+        'purpose': 'delivery_test_not_investment_advice', 'stage': stage,
+        'execution_mode': execution_mode, 'requested_at': requested_at.isoformat(),
+        'generated_at': generated_at.isoformat(), 'scheduled_for': slot.isoformat(),
+        'timing_status': timing,
+        'coverage': {
+            'global_markets': 'NOT_IMPLEMENTED', 'industry_ranking': 'NOT_IMPLEMENTED',
+            'morning_baseline': 'MISSING', 'multi_timeframe': 'NOT_IMPLEMENTED',
+            'prediction_pairing': 'MISSING', 'exchange_calendar': 'NOT_IMPLEMENTED',
+        },
+        'synthetic_account': {
+            'id': 'SIMULATED-ONLY',
+            'positions': [{'symbol': 'DEMO_A', 'weight_pct': 10}, {'symbol': 'DEMO_B', 'weight_pct': 5}],
+            'cash_pct': 85,
+        },
+        'decision': {
+            'action': 'WAIT', 'position_change_pct': 0, 'score': None,
+            'manual_confirmation_required': True, 'auto_trade_enabled': False,
+        },
+        'real_account_trial_day': False,
+    }
+
+
+def _finite_number(value, *, positive=False):
+    return (type(value) in (int, float) and math.isfinite(value)
+            and (not positive or value > 0))
+
+
+def _quote_record(code, price=None, change=None, error=None):
+    return {
+        'code': code, 'name': PUBLIC_SYMBOLS[code], 'price': price, 'change_pct': change,
+        # Sina's short index format does NOT provide a reliable source time.
+        'source_as_of': None, 'freshness': 'UNKNOWN', 'error_code': error,
+    }
+
+
+def _collect_quote(provider, code):
+    try:
+        quote = provider.fetch(code)
+    except Exception:
+        return _quote_record(code, error='PROVIDER_UNAVAILABLE')
+    if quote is None:
+        return _quote_record(code, error='NO_QUOTE')
+    try:
+        if (type(quote.code) is not str or quote.code != code
+                or not _finite_number(quote.price, positive=True)
+                or not _finite_number(quote.change)):
+            return _quote_record(code, error='INVALID_QUOTE')
+        return _quote_record(code, float(quote.price), float(quote.change))
+    except Exception:
+        return _quote_record(code, error='INVALID_QUOTE')
+
+
+def _market(quotes):
+    count = sum(quote['error_code'] is None for quote in quotes)
+    status = ('available_unverified' if count == len(PUBLIC_SYMBOLS)
+              else 'partial' if count else 'unavailable')
+    return {'source': 'sina_public', 'status': status, 'quotes': quotes}
+
+
+def build_snapshot(stage, *, provider, requested_at, generated_at=None, execution_mode='manual_replay'):
+    # Validate intent BEFORE network requests. Capture completion afterwards,
+    # without moving the original requested date when collection crosses midnight.
+    _metadata(stage, requested_at, requested_at if generated_at is None else generated_at, execution_mode)
+    quotes = [_collect_quote(provider, code) for code in PUBLIC_SYMBOLS]
+    result = _metadata(stage, requested_at, _now() if generated_at is None else generated_at, execution_mode)
+    result['market'] = _market(quotes)
+    validate_snapshot(result)
+    return result
+
+
+def _same(actual, expected):
+    if type(actual) is not type(expected):
+        return False
+    if type(expected) is dict:
+        return actual.keys() == expected.keys() and all(_same(actual[key], value) for key, value in expected.items())
+    if type(expected) is list:
+        return len(actual) == len(expected) and all(_same(a, b) for a, b in zip(actual, expected))
+    return actual == expected
+
+
+def validate_snapshot(payload):
+    """Strict allowlist: no account fields, arbitrary strings or extra keys."""
+    try:
+        if type(payload) is not dict:
+            _invalid()
+        expected = _metadata(
+            payload['stage'], _parse_time(payload['requested_at']),
+            _parse_time(payload['generated_at']), payload['execution_mode'],
+        )
+        quotes = payload['market']['quotes']
+        if type(quotes) is not list or len(quotes) != len(PUBLIC_SYMBOLS):
+            _invalid()
+        checked = []
+        for code, quote in zip(PUBLIC_SYMBOLS, quotes):
+            if type(quote) is not dict:
+                _invalid()
+            error = quote['error_code']
+            if error is None:
+                if (not _finite_number(quote['price'], positive=True)
+                        or not _finite_number(quote['change_pct'])):
+                    _invalid()
+                checked.append(_quote_record(code, quote['price'], quote['change_pct']))
+            elif type(error) is str and error in _ERRORS:
+                checked.append(_quote_record(code, error=error))
+            else:
+                _invalid()
+        expected['market'] = _market(checked)
+        if not _same(payload, expected):
+            _invalid()
+    except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+        _invalid()
+
+
+def render_report(payload):
+    validate_snapshot(payload)
+    stage = payload['stage']
+    lines = [
+        f"## {STAGES[stage]} {_TITLES[stage]}｜公开联调测试", '',
+        '合成账户 · 非交易信号 · 不计入五交易日真实账户验收',
+        f"场景时点：{payload['scheduled_for']}",
+        f"实际采集开始：{payload['requested_at']}",
+        f"报告完成：{payload['generated_at']}",
+        f"执行标记：{payload['execution_mode']} / {payload['timing_status']}",
+        f"公共行情：{payload['market']['status']}；来源时间未知（UNKNOWN），新鲜度未经验证。", '',
+    ]
+    if stage == 'morning':
+        lines += [
+            '隔夜全球市场：美股/纳斯达克/半导体/美债/美元/黄金/原油尚未接入，不判断强弱。',
+            '市场趋势/风险：UNKNOWN；行业排序与评分：未接入。',
+            '以下只是公共国内指数观测，不代表你的持仓：', '',
+        ]
+        for quote in payload['market']['quotes']:
+            value = (f"{quote['price']:.4f}（{quote['change_pct']:+.2f}%）"
+                     if quote['error_code'] is None else f"不可用（{quote['error_code']}）")
+            lines.append(f"- {quote['name']}：{value}")
+        lines += ['', '合成持仓扫描：DEMO_A 10%、DEMO_B 5%、演示现金85%；不是实际账户。']
+    elif stage == 'midday':
+        lines += [
+            '相对当天晨报：缺少可靠基线，暂无法比较；不把累计成本收益写成午盘变化。',
+            '资金流/行业评分变化：未接入；暂不补仓，等待经核实的数据。',
+        ]
+    elif stage == 'decision':
+        lines += [
+            '标的：DEMO_A / DEMO_B（合成示例）；综合评分：未接入。',
+            '周线 / 日线 / 120分钟 / 30分钟 / 5分钟：缺少已验证的结构数据。',
+            '14:30 时当日下午120分钟K线尚未闭合，不能据此声称确认二买。',
+            '建议仓位变动：0%；风险：来源时间未知、评分与多周期依据不足。',
+        ]
+    else:
+        lines += [
+            '事前判断 → 今日走势 → 对错评价：缺少配对记录，暂无法比较。',
+            '模型调整：不做调整；不把一次合成演练当作模型学习或真实日验收。',
+        ]
+    lines += ['', '动作：WAIT。只提醒；交易须由你人工确认并手动执行。',
+              '调度为工作日演练，不等于交易日历；GitHub 定时任务不保证准点。']
+    return '\n'.join(lines)
+
+
+def _bundle(snapshots):
+    return '# 公开通知链路测试（非投资建议）\n\n' + '\n\n---\n\n'.join(
+        render_report(snapshot) for snapshot in snapshots
+    ) + '\n'
+
+
+def _is_link(path):
+    if not path.exists() and not path.is_symlink():
+        return False
+    info = path.lstat()
+    return path.is_symlink() or bool(getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _check_directory(directory, *, allow_git=False):
+    directory = Path(directory).absolute()
+    if any(_is_link(path) for path in [directory, *directory.parents]):
+        _invalid()
+    if directory.exists():
+        if not directory.is_dir():
+            _invalid()
+        for path in directory.iterdir():
+            if _is_link(path):
+                _invalid()
+            if path.name == '.git' and allow_git and path.is_dir():
+                continue
+            if path.name == 'README.md' and path.is_file():
+                continue
+            if path.name != 'latest' or not path.is_dir():
+                _invalid()
+            for child in path.iterdir():
+                if (_is_link(child) or not child.is_file()
+                        or child.name not in {f'{stage}.json' for stage in STAGES}):
+                    _invalid()
+    return directory
+
+
+def _json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            _invalid()
+        result[key] = value
+    return result
+
+
+def _read_reports(directory, *, allow_git=False):
+    directory = _check_directory(directory, allow_git=allow_git)
+    result = []
+    for stage in STAGES:
+        path = directory / 'latest' / f'{stage}.json'
+        if path.exists():
+            if path.stat().st_size > 65536:
+                _invalid()
+            try:
+                payload = json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=_json_pairs)
+            except (ValueError, UnicodeError, RecursionError):
+                _invalid()
+            validate_snapshot(payload)
+            if payload['stage'] != stage:
+                _invalid()
+            result.append(payload)
+    return result
+
+
+def _atomic_write(path, content):
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                     suffix='.tmp', delete=False, newline='\n') as handle:
+        temporary = Path(handle.name)
+        handle.write(content)
+    try:
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def write_reports(snapshots, output_dir):
+    if type(snapshots) is not list or not snapshots:
+        _invalid()
+    for payload in snapshots:
+        validate_snapshot(payload)
+    if len({payload['stage'] for payload in snapshots}) != len(snapshots):
+        _invalid()
+    directory = _check_directory(output_dir)
+    merged = {payload['stage']: payload for payload in _read_reports(directory)}
+    merged.update({payload['stage']: payload for payload in snapshots})
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / 'latest').mkdir(exist_ok=True)
+    for payload in snapshots:
+        _atomic_write(directory / 'latest' / f"{payload['stage']}.json",
+                      json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + '\n')
+    _atomic_write(directory / 'README.md', _bundle([merged[stage] for stage in STAGES if stage in merged]))
+
+
+class _IsolatedSession(requests.Session):
+    def __init__(self):
+        super().__init__()
+        self.trust_env = False  # No proxy or implicit .netrc credentials.
+
+    def request(self, *args, **kwargs):
+        kwargs['allow_redirects'] = False
+        response = super().request(*args, **kwargs)
+        if 300 <= response.status_code < 400:
+            raise requests.RequestException('REDIRECT_BLOCKED')
+        return response
+
+
+def send_test_notification(snapshots, *, notifier=None):
+    if type(snapshots) is not list or not snapshots:
+        _invalid()
+    content = _bundle(snapshots)
+    if len(content.encode('utf-8')) > 18000:
+        _invalid()
+    session = None
+    if notifier is None:
+        # This import and credential access only happen on explicit notify.
+        from app.notify.feishu import FeishuNotifier
+
+        session = _IsolatedSession()
+        notifier = FeishuNotifier(session=session)
+        if notifier.webhook:
+            try:
+                url = urlsplit(notifier.webhook)
+                safe = (url.scheme == 'https' and url.netloc == 'open.feishu.cn'
+                        and re.fullmatch(r'/open-apis/bot/v2/hook/[A-Za-z0-9-]+', url.path)
+                        and not url.query and not url.fragment)
+            except (ValueError, TypeError):
+                safe = False
+            if not safe:
+                session.close()
+                return 'failed'
+        elif not all((notifier.app_id, notifier.app_secret, notifier.receive_id)):
+            session.close()
+            return 'not_configured'
+        elif notifier.receive_id_type not in {'open_id', 'user_id', 'union_id', 'email', 'chat_id'}:
+            session.close()
+            return 'failed'
+    try:
+        return 'accepted' if notifier.send(content) is True else 'failed'
+    except Exception:
+        return 'failed'
+    finally:
+        if session is not None:
+            session.close()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Public/synthetic notification trial only')
+    commands = parser.add_subparsers(dest='command', required=True)
+    collect = commands.add_parser('collect')
+    collect.add_argument('--stage', choices=[*STAGES, 'all'], required=True)
+    collect.add_argument('--mode', choices=['manual_replay', 'scheduled'], default='manual_replay')
+    collect.add_argument('--output', required=True)
+    for command in ('validate', 'summary', 'notify'):
+        commands.add_parser(command).add_argument('--input', required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == 'collect':
+            if args.stage == 'all' and args.mode != 'manual_replay':
+                _invalid()
+            # Validate output before any network traffic.
+            _check_directory(args.output)
+            requested_at = _now()
+            with _IsolatedSession() as session:
+                provider = SinaProvider(session=session)
+                snapshots = [build_snapshot(stage, provider=provider, requested_at=requested_at,
+                                            execution_mode=args.mode)
+                             for stage in (STAGES if args.stage == 'all' else [args.stage])]
+            write_reports(snapshots, args.output)
+            for payload in snapshots:
+                print(f"stage={payload['stage']} market_status={payload['market']['status']} trading_ready=false")
+        else:
+            snapshots = _read_reports(args.input, allow_git=args.command != 'notify')
+            if not snapshots:
+                _invalid()
+            if args.command == 'summary':
+                _atomic_write(Path(args.input) / 'README.md', _bundle(snapshots))
+            elif args.command == 'validate':
+                readme = Path(args.input) / 'README.md'
+                if readme.stat().st_size > 65536 or readme.read_text(encoding='utf-8') != _bundle(snapshots):
+                    _invalid()
+                print('public_schema=valid trading_ready=false real_account_trial_day=false')
+            else:
+                status = send_test_notification(snapshots)
+                print(f'notification_status={status}')
+                return {'accepted': 0, 'failed': 1, 'not_configured': 2}[status]
+        return 0
+    except Exception:
+        print('PUBLIC_TRIAL_FAILED')
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

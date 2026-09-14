@@ -1,0 +1,39 @@
+# SYNTHETIC ONLY. All amounts, costs and quantities are fabricated test values.
+# Not a portfolio recommendation. Keep real configuration out of public Git history.
+schema_version: 2
+accounts:
+  - account_id: DEMO_A
+    name: 合成演示账户一
+    strategy: long_term_core
+    baseline_date: "2026-01-05"
+    total_assets: 1000.00
+    cash: 700.00
+    holdings:
+      - code: "510300"
+        name: 合成指数样例
+        market: CN
+        instrument_type: etf
+        valuation_mode: exchange
+        cost_price: 1.2345
+        position_percent: 0.30
+        baseline_value: 300.00
+        sector: synthetic
+        theme: synthetic
+  - account_id: DEMO_B
+    name: 合成演示账户二
+    strategy: active_equity
+    baseline_date: "2026-01-05"
+    total_assets: 2000.50
+    cash: 1500.50
+    holdings:
+      - code: "600000"
+        name: 合成股票样例
+        market: CN
+        instrument_type: stock
+        valuation_mode: exchange
+        cost_price: 9.8765
+        quantity: 50
+        baseline_price: 10.000
+        baseline_value: 500.00
+        sector: synthetic
+        theme: synthetic

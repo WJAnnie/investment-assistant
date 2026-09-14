@@ -1,0 +1,244 @@
+name: Public synthetic reminder trial
+
+on:
+  schedule:
+    # UTC -> Asia/Shanghai. Weekday simulation, NOT an exchange calendar.
+    - cron: "0 1 * * 1-5"   # 09:00
+    - cron: "30 3 * * 1-5"  # 11:30
+    - cron: "30 6 * * 1-5"  # 14:30
+    - cron: "10 8 * * 1-5"  # 16:10
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Synthetic scenario (all is a replay, not four real collection times)
+        type: choice
+        default: all
+        required: true
+        options: [all, morning, midday, decision, closing]
+      send_notification:
+        description: Send one explicitly synthetic Feishu test message
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-synthetic-reminder-trial
+  cancel-in-progress: false
+
+jobs:
+  public-trial:
+    if: >-
+      github.repository == 'WJAnnie/investment-assistant' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.private == false &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Check out only the public trial surface
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/workflows/public-trial.yml
+            /app/integration/__init__.py
+            /app/integration/public_trial.py
+            /app/market/sina.py
+            /app/market/models.py
+            /app/notify/feishu.py
+            /tests/test_feishu.py
+            /tests/test_public_trial.py
+            /tests/test_public_trial_delivery.py
+            /tests/test_public_trial_workflow.py
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          # No dependency cache or account-containing artifacts.
+
+      - name: Install existing public-only dependencies
+        run: python -m pip install --disable-pip-version-check --no-cache-dir requests==2.32.5 PyYAML==6.0.3
+
+      - name: Offline boundary regression tests
+        id: tests
+        run: |
+          python -m unittest discover -s tests -p 'test_public_trial*.py'
+          python -m unittest discover -s tests -p 'test_feishu.py'
+          python -m compileall -q app tests
+
+      - name: Select scenario without shell interpolation
+        id: scenario
+        shell: bash
+        env:
+          MANUAL_STAGE: ${{ inputs.stage }}
+          SCHEDULE_EXPRESSION: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            case "${MANUAL_STAGE}" in
+              all|morning|midday|decision|closing) stage="${MANUAL_STAGE}" ;;
+              *) echo 'Invalid public trial stage' >&2; exit 2 ;;
+            esac
+            mode=manual_replay
+          elif [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            case "${SCHEDULE_EXPRESSION}" in
+              "0 1 * * 1-5") stage=morning ;;
+              "30 3 * * 1-5") stage=midday ;;
+              "30 6 * * 1-5") stage=decision ;;
+              "10 8 * * 1-5") stage=closing ;;
+              *) echo 'Unknown public trial schedule' >&2; exit 2 ;;
+            esac
+            mode=scheduled
+          else
+            exit 2
+          fi
+          echo "stage=${stage}" >> "${GITHUB_OUTPUT}"
+          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+
+      - name: Collect public observations and synthetic reports
+        id: collect
+        shell: bash
+        env:
+          TRIAL_STAGE: ${{ steps.scenario.outputs.stage }}
+          TRIAL_MODE: ${{ steps.scenario.outputs.mode }}
+        run: |
+          set -euo pipefail
+          python -m app.integration.public_trial collect \
+            --stage "${TRIAL_STAGE}" --mode "${TRIAL_MODE}" \
+            --output "${RUNNER_TEMP}/public-trial-output"
+          python -m app.integration.public_trial validate --input "${RUNNER_TEMP}/public-trial-output"
+
+      - name: Publish only validated public files to an isolated data branch
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          visibility="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.visibility')"
+          if [[ "${visibility}" != "public" ]]; then
+            echo 'Public trial publication target is not public' >&2
+            exit 1
+          fi
+          python -m app.integration.public_trial validate --input "${RUNNER_TEMP}/public-trial-output"
+          publish_dir="$(mktemp -d "${RUNNER_TEMP}/public-test-publish.XXXXXX")"
+          git init --initial-branch=public-test-data "${publish_dir}"
+          git -C "${publish_dir}" config user.name 'github-actions[bot]'
+          git -C "${publish_dir}" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "${publish_dir}" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          gh auth setup-git
+          if git -C "${publish_dir}" ls-remote --exit-code --heads origin refs/heads/public-test-data >/dev/null; then
+            git -C "${publish_dir}" fetch --depth=1 origin refs/heads/public-test-data
+            git -C "${publish_dir}" checkout -B public-test-data FETCH_HEAD
+            # Reject unsafe pre-existing files and symlinks BEFORE copying.
+            python -m app.integration.public_trial validate --input "${publish_dir}"
+          else
+            lookup_exit=$?
+            if [[ "${lookup_exit}" != "2" ]]; then
+              echo 'Data branch lookup failed' >&2
+              exit 1
+            fi
+          fi
+          mkdir -p "${publish_dir}/latest"
+          for stage in morning midday decision closing; do
+            source_file="${RUNNER_TEMP}/public-trial-output/latest/${stage}.json"
+            if [[ -f "${source_file}" ]]; then
+              cp -- "${source_file}" "${publish_dir}/latest/${stage}.json"
+            fi
+          done
+          python -m app.integration.public_trial summary --input "${publish_dir}"
+          python -m app.integration.public_trial validate --input "${publish_dir}"
+          git -C "${publish_dir}" add -- README.md
+          for stage in morning midday decision closing; do
+            if [[ -f "${publish_dir}/latest/${stage}.json" ]]; then
+              git -C "${publish_dir}" add -- "latest/${stage}.json"
+            fi
+          done
+          if ! git -C "${publish_dir}" diff --cached --quiet; then
+            git -C "${publish_dir}" commit \
+              -m 'Make the synthetic reminder delivery test inspectable' \
+              -m $'Constraint: Public observations and synthetic fixtures only\nConfidence: high\nScope-risk: narrow\nDirective: Never add real account data to this branch\nTested: Strict public schema and offline isolation regressions'
+          fi
+          git -C "${publish_dir}" push origin HEAD:refs/heads/public-test-data
+          local_sha="$(git -C "${publish_dir}" rev-parse HEAD)"
+          remote_sha="$(git -C "${publish_dir}" ls-remote --heads origin refs/heads/public-test-data | cut -f1)"
+          if [[ "${local_sha}" != "${remote_sha}" || -z "${remote_sha}" ]]; then
+            echo 'Public publication was not independently confirmed' >&2
+            exit 1
+          fi
+          echo "sha=${remote_sha}" >> "${GITHUB_OUTPUT}"
+          echo 'confirmed=true' >> "${GITHUB_OUTPUT}"
+
+      - name: Send one synthetic test notification
+        id: notify
+        if: >-
+          steps.publish.outcome == 'success' && github.run_attempt == 1 &&
+          (github.event_name == 'schedule' || inputs.send_notification == true)
+        shell: bash
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_RECEIVE_ID: ${{ secrets.FEISHU_RECEIVE_ID }}
+          FEISHU_RECEIVE_ID_TYPE: ${{ secrets.FEISHU_RECEIVE_ID_TYPE }}
+        run: |
+          set -euo pipefail
+          set +e
+          result="$(python -m app.integration.public_trial notify --input "${RUNNER_TEMP}/public-trial-output")"
+          notify_exit=$?
+          set -e
+          case "${result}" in
+            notification_status=accepted) status=accepted ;;
+            notification_status=not_configured) status=not_configured ;;
+            *) status=failed ;;
+          esac
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+          echo "Notification API status: ${status}; device receipt is not verified."
+          if [[ "${notify_exit}" != "0" || "${status}" != "accepted" ]]; then
+            exit 1
+          fi
+
+      - name: Record actual delivery outcomes
+        if: always()
+        shell: bash
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+          COLLECT_OUTCOME: ${{ steps.collect.outcome }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          PUSH_CONFIRMED: ${{ steps.publish.outputs.confirmed }}
+          NOTIFY_OUTCOME: ${{ steps.notify.outcome }}
+          NOTIFY_STATUS: ${{ steps.notify.outputs.status }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## Public / synthetic delivery test only'
+            echo "Offline tests: ${TEST_OUTCOME}; collection command: ${COLLECT_OUTCOME}."
+            echo "Public publication: ${PUBLISH_OUTCOME}; remote commit confirmed: ${PUSH_CONFIRMED}."
+            echo "Notification step: ${NOTIFY_OUTCOME}; API status: ${NOTIFY_STATUS:-not_sent}."
+            echo 'A skipped notification is not an accepted notification. Reruns do not send again.'
+            echo 'A successful run proves test transport, not market freshness, device receipt or ChatGPT consumption.'
+            echo 'All decisions remain WAIT. Real account trial days: 0.'
+            echo "[Public test reports](https://github.com/${GITHUB_REPOSITORY}/tree/public-test-data)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${TEST_OUTCOME}" != "success" || "${COLLECT_OUTCOME}" != "success" || "${PUBLISH_OUTCOME}" != "success" || "${PUSH_CONFIRMED}" != "true" ]]; then
+            exit 1
+          fi
+          if [[ "${NOTIFY_OUTCOME}" != "success" && "${NOTIFY_OUTCOME}" != "skipped" ]]; then
+            exit 1
+          fi
+          if [[ "${NOTIFY_OUTCOME}" == "success" && "${NOTIFY_STATUS}" != "accepted" ]]; then
+            exit 1
+          fi

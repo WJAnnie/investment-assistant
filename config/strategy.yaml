@@ -1,0 +1,23 @@
+strategy:
+  trading_style: medium_long
+  confirmation_priority: true
+
+accounts:
+  long_term_core:
+    concentration_warning: 30%
+    concentration_high: 35%
+  active_equity:
+    concentration_warning: 25%
+    concentration_high: 30%
+
+chan:
+  class_second_buy:
+    position: 5-8%
+  second_buy:
+    position: 8-15%
+  third_buy:
+    position: 5-10%
+
+risk:
+  max_single_position: 30%
+  north_market_max_position: 15%

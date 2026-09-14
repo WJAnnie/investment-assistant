@@ -1,0 +1,26 @@
+# Trading rule contract, version 8.1 (《股票研究与交易体系 V8.1》)
+version: "8.1"
+
+technical:
+  macd:
+    fast: 6
+    slow: 13
+    signal: 4
+
+risk:
+  trade_risk_min: 0.005
+  trade_risk_max: 0.010
+  minimum_rr: 2.0
+  preferred_rr: 2.5
+
+cycles:
+  weekly: position
+  daily: direction
+  120m: core_buy_point
+  30m: pullback_confirmation
+  15m: execution
+  5m: price_optimization
+
+decision:
+  require_all_seven_gates: true
+  auto_execute: false

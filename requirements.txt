@@ -1,0 +1,9 @@
+pandas
+numpy
+requests
+python-dotenv
+pyyaml
+apscheduler
+loguru
+pytest
+akshare

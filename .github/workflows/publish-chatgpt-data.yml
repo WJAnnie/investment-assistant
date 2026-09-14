@@ -1,0 +1,197 @@
+name: Publish ChatGPT market data
+
+on:
+  schedule:
+    # GitHub uses UTC. Collection starts one minute after each Shanghai cutoff.
+    - cron: "31 22 * * 0-4" # 06:31 global (next local day)
+    - cron: "1 1 * * 1-5"   # 09:01 morning
+    - cron: "31 3 * * 1-5"  # 11:31 midday
+    - cron: "31 6 * * 1-5"  # 14:31 trading
+    - cron: "11 8 * * 1-5"  # 16:11 A/H股 closing
+  workflow_dispatch:
+    inputs:
+      report_kind:
+        description: Report scenario to collect
+        required: true
+        default: closing
+        type: choice
+        options:
+          - global
+          - morning
+          - midday
+          - trading
+          - closing
+
+permissions:
+  contents: write
+
+concurrency:
+  # All scenarios write the same branch; serialize manual and scheduled runs.
+  group: chatgpt-market-data
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATA_BRANCH: chatgpt-data
+
+    steps:
+      - name: Verify private publication target
+        id: privacy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          visibility="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.visibility')"
+          if [[ "${visibility}" != "private" ]]; then
+            echo "::error::Private account exports require a private repository. No account data was collected."
+            exit 1
+          fi
+          echo "visibility=private" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check --no-cache-dir -r requirements.txt
+
+      - name: Select report scenario
+        id: scenario
+        shell: bash
+        env:
+          MANUAL_REPORT_KIND: ${{ inputs.report_kind }}
+          SCHEDULE_EXPRESSION: ${{ github.event.schedule }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            report_kind="${MANUAL_REPORT_KIND}"
+          else
+            case "${SCHEDULE_EXPRESSION}" in
+              "31 22 * * 0-4") report_kind=global ;;
+              "1 1 * * 1-5") report_kind=morning ;;
+              "31 3 * * 1-5") report_kind=midday ;;
+              "31 6 * * 1-5") report_kind=trading ;;
+              "11 8 * * 1-5") report_kind=closing ;;
+              *) echo "Unknown schedule: ${SCHEDULE_EXPRESSION}" >&2; exit 2 ;;
+            esac
+          fi
+          echo "report_kind=${report_kind}" >> "${GITHUB_OUTPUT}"
+
+      - name: Collect and validate data
+        id: collect
+        shell: bash
+        env:
+          REPORT_KIND: ${{ steps.scenario.outputs.report_kind }}
+          GITHUB_REPOSITORY_VISIBILITY: ${{ steps.privacy.outputs.visibility }}
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/chatgpt-export"
+          set +e
+          python -m app.integration.github_export collect \
+            --report-kind "${REPORT_KIND}" \
+            --output "${RUNNER_TEMP}/chatgpt-export/current.json"
+          collect_exit=$?
+          set -e
+          python -m app.integration.github_export validate \
+            --input "${RUNNER_TEMP}/chatgpt-export/current.json"
+          echo "collect_exit=${collect_exit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out persistent data branch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin "${DATA_BRANCH}" >/dev/null 2>&1; then
+            git switch --force-create "${DATA_BRANCH}" "origin/${DATA_BRANCH}"
+            git merge --no-edit \
+              -m $'Keep the ChatGPT data publisher aligned with its source\n\nConstraint: Preserve generated snapshots on a dedicated branch\nConfidence: high\nScope-risk: narrow\nTested: Source and data histories merged by GitHub Actions' \
+              "origin/${GITHUB_REF_NAME}"
+          else
+            git switch --create "${DATA_BRANCH}"
+          fi
+
+      - name: Publish current and latest snapshots
+        id: publish
+        shell: bash
+        env:
+          REPORT_KIND: ${{ steps.scenario.outputs.report_kind }}
+          GITHUB_REPOSITORY_VISIBILITY: ${{ steps.privacy.outputs.visibility }}
+        run: |
+          mkdir -p data/chatgpt/latest
+          cp "${RUNNER_TEMP}/chatgpt-export/current.json" data/chatgpt/current.json
+          cp "${RUNNER_TEMP}/chatgpt-export/current.json" "data/chatgpt/latest/${REPORT_KIND}.json"
+          python -m app.integration.github_export manifest \
+            --latest-dir data/chatgpt/latest \
+            --current data/chatgpt/current.json \
+            --output data/chatgpt/manifest.json
+          # Gate after building the manifest so diagnosis data is still
+          # committed below; the final step turns a non-publishable result
+          # into a failed job instead of a silent success.
+          set +e
+          python -m app.integration.github_export gate \
+            --manifest data/chatgpt/manifest.json
+          gate_exit=$?
+          set -e
+          echo "gate_exit=${gate_exit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Commit data snapshot
+        id: commit
+        shell: bash
+        env:
+          REPORT_KIND: ${{ steps.scenario.outputs.report_kind }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Visibility can change during collection; recheck before any data
+          # is staged or pushed. Unknown/internal/public are never private.
+          visibility="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.visibility')"
+          if [[ "${visibility}" != "private" ]]; then
+            echo "::error::Private publication target is no longer verified. No data will be pushed."
+            exit 1
+          fi
+          # Stage the whole data directory so snapshot and manifest updates,
+          # including preserved legacy entries recorded as superseded,
+          # alongside the new payload.
+          git add -A data/chatgpt
+          git commit \
+            -m "Provide fresh ${REPORT_KIND} evidence for ChatGPT analysis" \
+            -m $'Constraint: Generated by the scheduled market-data workflow\nConfidence: high\nScope-risk: narrow\nTested: Snapshot schema and manifest validation'
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin "${DATA_BRANCH}"
+          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Gate publishability
+        if: always()
+        shell: bash
+        env:
+          GATE_EXIT: ${{ steps.publish.outputs.gate_exit }}
+          COLLECT_EXIT: ${{ steps.collect.outputs.collect_exit }}
+          PRIVACY_OUTCOME: ${{ steps.privacy.outcome }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          COMMIT_OUTCOME: ${{ steps.commit.outcome }}
+        run: |
+          if [[ "${PRIVACY_OUTCOME}" != "success" || "${PUBLISH_OUTCOME}" != "success" || "${COMMIT_OUTCOME}" != "success" ]]; then
+            echo "Private snapshot delivery was not confirmed (privacy=${PRIVACY_OUTCOME}, manifest=${PUBLISH_OUTCOME}, push=${COMMIT_OUTCOME})." >&2
+            exit 1
+          fi
+          failed=0
+          if [[ "${COLLECT_EXIT}" != "0" ]]; then
+            echo "Collection did not complete: collect_exit=${COLLECT_EXIT} (1=failed, 2=partial/NOT_READY)." >&2
+            failed=1
+          fi
+          if [[ "${GATE_EXIT}" != "0" ]]; then
+            echo "DATA_NOT_READY: the manifest does not advertise an analyzable current payload (gate_exit=${GATE_EXIT}); the latest snapshot was published for diagnosis only." >&2
+            failed=1
+          fi
+          if [[ "${failed}" != "0" ]]; then
+            echo "This run must not be treated as a successful analyzable release." >&2
+            exit 1
+          fi
+          echo "Published an analyzable latest snapshot for ChatGPT."

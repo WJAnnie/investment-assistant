@@ -1,0 +1,452 @@
+"""Deterministic, offline renderers for scheduled portfolio reports."""
+
+from datetime import datetime
+from decimal import Decimal
+
+from app.utils.redaction import redact_secrets
+
+
+STAGE_HEADINGS = {
+    "global": "隔夜与全球影响",
+    "morning": "开盘前观察",
+    "midday": "午盘变化复核",
+    "trading": "执行条件复核",
+    "closing": "A/H股收盘复盘与恒生科技",
+}
+
+STAGE_ACTIONS = {
+    "global": (
+        "检查隔夜海外市场、港股传导和全球医疗估值日期。",
+        "数据缺失、日期错位或市场状态不明时：WAIT，等待补齐后再判断。",
+    ),
+    "morning": (
+        "检查前一交易日收盘条件、开盘缺口、持仓强弱和异常估值。",
+        "陈旧/失败数据或缺少开盘证据时：WAIT，不作方向性结论。",
+    ),
+    "midday": (
+        "比较同日晨报参考价变化、持仓异常和数据完整性。",
+        "下午尚未收盘或数据不完整时：WAIT，不把半日波动外推为全天结果。",
+    ),
+    "trading": (
+        "检查仓位、集中度，以及已闭合周期的技术/缠论条件。",
+        "任一周期未闭合、数据过期、风险上下文缺失或条件不全时：WAIT。",
+    ),
+    "closing": (
+        "检查收盘端点、事前判断配对、基金净值日期和集中度。",
+        "基金净值滞后、接口失败或归因不完整时：WAIT，形成次日观察清单。",
+    ),
+}
+
+_STRATEGIES = {
+    "long_term_core": "长期核心配置",
+    "active_equity": "主动个股增强",
+}
+
+
+def format_portfolio_report(snapshot, report_kind, now, benchmark=None, analysis=None,
+                            stage_context=None):
+    analysis_map = _analysis_map(analysis)
+    if report_kind not in STAGE_HEADINGS:
+        raise ValueError(f"unsupported report_kind: {report_kind}")
+    sections = [
+        _format_header(report_kind, now),
+        _format_action_guidance(report_kind),
+        _format_market_context(report_kind, benchmark, analysis, snapshot),
+        *(
+            _format_account(account, report_kind, analysis_map)
+            for account in _ordered_accounts(snapshot.accounts)
+        ),
+        _format_combined(snapshot),
+        _format_stage_changes(report_kind, stage_context),
+        _format_research_status(analysis, report_kind),
+        _format_risk(snapshot, report_kind),
+        "纪律：仅供研究复核，不自动交易，不构成投资建议。",
+    ]
+    return "\n\n".join(section for section in sections if section)
+
+
+def format_failure_reminder(report_kind, now, errors=None, *, allow_retry=True):
+    """Render a fail-closed reminder without leaking provider internals."""
+    report_kind = report_kind if type(report_kind) is str else None
+    heading = STAGE_HEADINGS.get(report_kind, "未知报告阶段")
+    timestamp = (
+        now.strftime("%Y-%m-%d %H:%M:%S %z")
+        if isinstance(now, datetime) and now.utcoffset() is not None
+        else "未验证"
+    )
+    error_count = len(tuple(errors or ()))
+    recovery = (
+        "本次无法形成完整报告，请检查数据源、时间戳和网络状态，补齐后再重试。"
+        if allow_retry is True else
+        "本次无法形成有效报告，请检查数据源、时间戳、冻结规则和阶段证据；"
+        "本时点不重跑补账，保留失败记录并人工处理。"
+    )
+    return "\n\n".join((
+        f"⚠️ 投资组合｜{heading}\n时间：{timestamp}",
+        f"数据未就绪\n{recovery}",
+        _format_action_guidance(report_kind),
+        f"诊断：已记录 {error_count} 项异常；输出仅保留异常类型，不附带账户或接口内部详情。",
+        "纪律：仅供研究复核，不自动下单；任何操作均由本人确认并手动执行。",
+    ))
+
+
+def _format_action_guidance(report_kind):
+    check, wait = STAGE_ACTIONS.get(
+        report_kind,
+        (
+            "检查报告类型和调度配置，修正后重新生成报告。",
+            "报告阶段无法识别时：WAIT，不形成任何方向性结论。",
+        ),
+    )
+    return (
+        "人工操作提醒\n"
+        f"1. {check}\n"
+        "2. 证据完整且风险条件通过时，也只进入人工复核，不直接形成交易指令。\n"
+        f"3. {wait}\n"
+        "4. 本系统只做辅助提醒，不自动下单；是否交易由本人确认并手动执行。"
+    )
+
+
+def _format_header(report_kind, now):
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S %z") if isinstance(now, datetime) else str(now)
+    return f"📊 投资组合｜{STAGE_HEADINGS[report_kind]}\n时间：{timestamp}"
+
+
+def _format_market_context(report_kind, benchmark, analysis=None, snapshot=None):
+    lines = [f"市场背景：{STAGE_HEADINGS[report_kind]}"]
+    if report_kind == "global":
+        lines.append("关注隔夜海外风险、港股传导与全球医疗估值的日期差异。")
+    elif report_kind == "morning":
+        lines.append("核对前一交易日收盘条件：缺口、强弱排序与持仓开盘观察清单。")
+    elif report_kind == "midday":
+        lines.append("只分析相对晨报基线的变化；半日波动不能代表全天收益。")
+    elif report_kind == "trading":
+        lines.append("复核仓位、集中度和有效技术条件；没有触发条件就保持观察。")
+    elif report_kind == "closing":
+        lines.append(
+            "核对 A 股收盘价和港股收盘价的精确端点，同时监控恒生科技指数、港股科技敞口和基金净值日期。"
+        )
+    if benchmark is not None and getattr(benchmark, "freshness", None) != "failed":
+        lines.append(
+            f"恒生科技指数：{_price(benchmark.price)}（{benchmark.change_percent:+.2f}%），"
+            f"数据状态：{_freshness(benchmark)}。"
+        )
+    elif report_kind == "closing":
+        lines.append("恒生科技指数：本次未返回有效点位，不能据此推导港股科技方向。")
+    if report_kind == "closing":
+        lines.append(_fund_nav_status(snapshot))
+    benchmark_analysis = (analysis or {}).get("benchmark") if analysis else None
+    if benchmark_analysis:
+        lines.append(_format_benchmark_analysis(benchmark_analysis))
+    return "\n".join(lines)
+
+
+def _format_account(account_snapshot, report_kind, analysis_map=None):
+    account = account_snapshot.account
+    strategy = _STRATEGIES.get(account.strategy, account.strategy)
+    lines = [
+        f"{account.name}｜{strategy}",
+        f"资产：{_money(account_snapshot.total_assets)}，仓位：{_percent(account_snapshot.position_percent)}",
+    ]
+    holdings = account_snapshot.holdings
+    if report_kind == "midday":
+        # The delta section below owns price changes. Do not repeat an entire
+        # morning analysis or rank cumulative cost P&L as intraday attribution.
+        holdings = tuple(
+            item for item in holdings if item.warnings or _is_unusable(item)
+        )
+    for holding in holdings:
+        lines.append(_format_holding(holding))
+        analysis_item = (analysis_map or {}).get((account.account_id, holding.holding.code))
+        if analysis_item is not None and report_kind != "midday":
+            lines.append(_format_analysis_item(analysis_item))
+            minute_text = _format_minute_context(analysis_item)
+            if minute_text:
+                lines.append(minute_text)
+        if report_kind == "trading":
+            lines.append(_format_decision_evidence(analysis_item))
+    if report_kind == "midday" and not holdings:
+        lines.append("持仓异常：无新增数据/风险警告；价格变化见晨报基线比较。")
+    if report_kind == "closing":
+        if account.account_id == "A":
+            lines.append(_format_hk_exposure(holdings))
+    if account_snapshot.warnings:
+        lines.append("账户提示：" + "；".join(account_snapshot.warnings))
+    return "\n".join(lines)
+
+
+def _format_holding(item):
+    holding = item.holding
+    precision = "精确数量估值" if item.value_precision == "exact" else "基准值估算"
+    details = [
+        f"{holding.code} {holding.name}",
+        f"市值 {_money(item.market_value)}",
+        f"权重 {_percent(item.account_weight)}",
+        precision,
+    ]
+    if item.return_from_cost is not None:
+        details.append(f"成本收益 {_percent(item.return_from_cost)}")
+    if item.valuation is not None:
+        details.append(f"数据日 {item.valuation.as_of.strftime('%Y-%m-%d')}")
+    if item.warnings:
+        details.append("警告：" + "、".join(item.warnings))
+    if _is_unusable(item):
+        details.append("数据已陈旧：" + _freshness(item.valuation))
+    return "；".join(details)
+
+
+def _format_combined(snapshot):
+    return (
+        f"全部账户｜总资产：{_money(snapshot.total_assets)}\n"
+        f"持仓：{_money(snapshot.holdings_value)}，现金：{_money(snapshot.cash)}，"
+        f"总仓位：{_percent(snapshot.position_percent)}"
+    )
+
+
+def _ordered_accounts(accounts):
+    preferred = {"A": 0, "B": 1}
+    return sorted(accounts, key=lambda item: (preferred.get(item.account.account_id, 2), item.account.account_id))
+
+
+def _is_hk_technology_holding(item):
+    holding = item.holding
+    return (
+        holding.market == "HK"
+        and holding.theme in {"hk_technology", "hk_internet"}
+    )
+
+
+def _format_hk_exposure(holdings):
+    hk_holdings = tuple(item for item in holdings if _is_hk_technology_holding(item))
+    if not hk_holdings:
+        return "港股科技敞口：暂无已配置的港股科技/互联网持仓。"
+    names = "、".join(f"{item.holding.code} {item.holding.name}" for item in hk_holdings)
+    return f"港股科技敞口：{names}；与恒生科技指数联动仅作观察，不替代基金净值核对。"
+
+
+def _fund_nav_status(snapshot):
+    if snapshot is None:
+        return "基金净值日期：未提供账户快照，无法核对。"
+    entries = []
+    for account in snapshot.accounts:
+        for item in account.holdings:
+            if item.holding.valuation_mode not in {"fund_nav", "qdii_nav"}:
+                continue
+            if item.valuation is None:
+                status = "未返回"
+            else:
+                status = item.valuation.as_of.strftime("%Y-%m-%d")
+            entries.append(f"{item.holding.code} {status}")
+    if not entries:
+        return "基金净值日期：本次没有可核对的基金/ETF 净值持仓。"
+    return "基金净值日期：" + "；".join(entries) + "。"
+
+
+def _format_stage_changes(report_kind, stage_context):
+    if report_kind not in {"midday", "trading", "closing"}:
+        return ""
+    context = stage_context or {}
+    comparison = context.get("comparison") or {}
+    lines = ["晨报基线比较（不是开盘以来盈亏，也不是实际交易收益）"]
+    if comparison.get("status") not in {"comparable", "partial"}:
+        lines.append("无法比较：缺少兼容的同日晨报基线或有效行情，不使用累计成本收益替代。")
+    else:
+        changed = False
+        for item in comparison.get("holdings", ()):
+            identity = f"{item.get('account_id', '')}/{item.get('code', '')}"
+            if item.get("status") != "comparable":
+                lines.append(f"{identity}：无法比较，基线/持仓口径/行情证据不匹配。")
+            elif Decimal(item["price_change"]) != 0:
+                changed = True
+                line = (f"{identity}：参考价 {item['baseline_price']} → {item['current_price']}；"
+                        f"价差 {item['price_change']}")
+                if item.get("value_change") is not None:
+                    line += f"；按不变数量估算市值变化 {_money(item['value_change'])}"
+                else:
+                    line += "；数量未确认，不推算金额"
+                lines.append(line)
+        for item in comparison.get("technical_changes", ()):
+            changed = True
+            lines.append(f"{item['account_id']}/{item['code']}：技术评分 "
+                         f"{item['before']} → {item['after']}（不是综合评分）")
+        if not changed:
+            lines.append("可比较部分未观察到价格/技术分数变化；继续观察，WAIT。")
+    if report_kind == "closing":
+        lines.append("事前判断 → 收盘结果 → 复核")
+        evaluations = (context.get("forecast_evaluation") or {}).get("evaluations", ())
+        if not evaluations:
+            lines.append("无法评价：没有已事前存档且具备有效收盘端点的明确预测，不补造昨日判断。")
+        for item in evaluations:
+            target = item.get("target") or {}
+            outcome = {"hit": "符合", "miss": "不符合"}.get(item.get("status"), "无法评价")
+            lines.append(f"{target.get('account_id', '')}/{target.get('code', '')}：{outcome}")
+        lines.append("模型学习：仅记录证据，不自动调整规则或权重；五日内保持规则版本冻结。")
+    return "\n".join(lines)
+
+
+def _format_risk(snapshot, report_kind):
+    warned = []
+    for account in snapshot.accounts:
+        for item in account.holdings:
+            for warning in item.warnings:
+                warned.append(f"{item.holding.name}：{warning}")
+    lines = ["风险与条件"]
+    if warned:
+        lines.append("；".join(dict.fromkeys(warned)))
+    if report_kind == "midday":
+        lines.append("下午仍可能修正；晨报参考价变化不能替代开盘以来收益或交易归因。")
+    elif report_kind == "trading":
+        lines.append("仅记录已触发的风险/技术条件；待数据完整后再复核。")
+    elif report_kind == "closing":
+        lines.append(
+            "收盘后检查事前判断配对、恒生科技联动、基金净值日期与集中度，"
+            "不把单日涨跌外推为长期结论。"
+        )
+    else:
+        lines.append("当前报告用于条件复核，不提供即时交易指令。")
+    return "\n".join(lines)
+
+
+def _analysis_map(analysis):
+    if not analysis:
+        return {}
+    return {
+        (item.get("account_id"), item.get("code")): item
+        for item in analysis.get("items", ())
+    }
+
+
+def _format_analysis_item(item):
+    code = item.get("code", "")
+    if item.get("status") != "ready":
+        return f"技术/缠论：{code} 未分析（{_public_analysis_reason(item)}）。"
+    technical = item["technical"]
+    trend = technical["trend"]
+    kdj = technical["kdj"]
+    boll = technical["boll"]
+    return (
+        f"技术/缠论：技术评分 {technical['score']}（非综合评分），趋势 {trend['direction']}，"
+        f"MACD柱 {technical['macd_hist']:+.4f}，RSI {technical['rsi']:.2f}，"
+        f"KDJ(J) {kdj['j']:.2f}，布林位置 {_ratio_text(boll['close_position'])}，"
+        f"分型/笔/线段/中枢 {item['chan']['fractals']}/"
+        f"{item['chan']['strokes']}/{item['chan']['segments']}/"
+        f"{item['chan']['zhongshu']}，缠论信号 {item['signal']}，"
+        "决策 WAIT（完整证据未就绪，待本人复核）。"
+    )
+
+
+def _format_decision_evidence(item):
+    item = item or {}
+    daily = "历史技术已计算，结构待复核" if item.get("status") == "ready" else "未就绪"
+    states = (item.get("minute_context") or {}).get("bar_status") or {}
+    labels = {"closed": "已闭合；结构未确认", "forming": "形成中，不参与确认",
+              "missing": "缺失", "invalid": "无效", "stale": "陈旧"}
+    lines = ["多周期证据：周线 未就绪；日线 " + daily]
+    lines.append("；".join(f"{label} {labels.get(states.get(cycle), '未就绪')}"
+                           for cycle, label in (("120m", "120分钟"), ("30m", "30分钟"), ("5m", "5分钟"))))
+    lines.append("完整分析：未就绪；动作 WAIT；建议仓位变化 +0%。补齐来源与风险证据后人工复核。")
+    return "\n".join(lines)
+
+
+def _format_minute_context(item):
+    context = item.get("minute_context") or {}
+    if context.get("configured") is not True:
+        return ""
+    labels = {"closed": "已闭合", "forming": "形成中", "missing": "缺失",
+              "invalid": "无效", "stale": "陈旧"}
+    states = context.get("bar_status") or {}
+    summary = "，".join(
+        f"{cycle} {labels.get(states.get(cycle), '未知')}"
+        for cycle in ("120m", "30m", "15m", "5m")
+    )
+    trigger = context.get("next_trigger") or {}
+    when = trigger.get("at") or "条件满足后（不预设时间）"
+    return redact_secrets(
+        f"分钟复核：{summary}。\n{context.get('reason', '分钟证据不足，WAIT。')}\n"
+        f"下一复核点：{when}；{trigger.get('condition', '等待数据齐全。')}"
+        f"{trigger.get('action', 'WAIT；仅作人工复核，不自动下单。')}",
+        environ={},
+    )
+
+
+def _format_benchmark_analysis(item):
+    if item.get("status") != "ready":
+        return f"恒生科技技术/缠论：未分析（{_public_analysis_reason(item)}）。"
+    technical = item["technical"]
+    return (
+        f"恒生科技技术/缠论：技术评分 {technical['score']}，趋势 {technical['trend']['direction']}，"
+        f"RSI {technical['rsi']:.2f}，信号 {item['signal']}。"
+    )
+
+
+def _format_research_status(analysis, report_kind):
+    coverage = (analysis or {}).get("coverage", {})
+    lines = [
+        "研究完整性",
+        "完整分析：未就绪；流程成功不等于研究证据完整。",
+        f"技术/缠论：{coverage.get('ready', 0)}/{coverage.get('total', 0)} 个持仓完成，"
+        f"{coverage.get('unavailable', 0)} 个因历史数据不足或接口失败降级。",
+        "基本面：未接入经校验的财报/估值数据源，不生成基本面结论。",
+        "行业：仅使用持仓配置中的行业标签，用于暴露统计，不等同于行业景气判断。",
+        "新闻：未接入经校验的新闻源，不把未核实消息写入决策。",
+        "市场环境：趋势/风险暂不评级；缺少完整跨市场证据。",
+        "行业排序：未就绪；没有可比较的行业数据，不编造行业评分或资金流向。",
+    ]
+    if analysis is None:
+        lines.append("技术/缠论：本次未执行历史分析。")
+    if report_kind in {"global", "morning"}:
+        lines.append("隔夜全球市场：美股主要指数、纳斯达克、半导体、美债、美元、黄金、原油："
+                     "完整来源及交易日期未就绪，暂不作 A 股影响判断。")
+    if any((item.get("minute_context") or {}).get("configured") is True
+           for item in (analysis or {}).get("items", ())):
+        minute_coverage = analysis.get("minute_coverage") or {}
+        lines.append(
+            f"分钟数据：{minute_coverage.get('ready', 0)}/{minute_coverage.get('total', 0)} "
+            "个持仓具备当前时段证据；仅校验闭合，不代表多周期结构确认。"
+        )
+    else:
+        lines.append("分钟数据：未接入经校验的分钟快照；不能据日线推断分钟结构确认。")
+    if report_kind == "trading":
+        lines.append("决策：只输出已触发的条件化复核，不自动下单。")
+    else:
+        lines.append("决策：技术与缠论结果仅作为人工复核输入，不自动下单。")
+    return "\n".join(lines)
+
+
+def _ratio_text(value):
+    return "未定义" if value is None else f"{Decimal(str(value)) * 100:.1f}%"
+
+
+def _public_analysis_reason(item):
+    """Return a concise user-facing reason without leaking provider internals."""
+    reason = str(item.get("reason") or "")
+    if reason.startswith("历史K线不足"):
+        summary = reason.split("，已排除", 1)[0]
+        return summary.replace("历史K线", "历史行情")
+    if reason == "历史K线接口未配置":
+        return "历史行情接口未配置，已降级为持仓与风险分析"
+    return "历史行情暂不可用，已降级为持仓与风险分析"
+
+
+def _is_unusable(item):
+    return item.valuation is None or item.valuation.freshness != "fresh"
+
+
+def _freshness(valuation):
+    if valuation is None:
+        return "缺少估值"
+    return {"fresh": "新鲜", "stale": "陈旧", "lagged": "滞后", "failed": "失败"}.get(
+        valuation.freshness, valuation.freshness
+    )
+
+
+def _money(value):
+    return f"{Decimal(str(value)):.2f}"
+
+
+def _price(value):
+    return f"{Decimal(str(value)):.2f}"
+
+
+def _percent(value):
+    return f"{Decimal(str(value)) * 100:+.2f}%"
