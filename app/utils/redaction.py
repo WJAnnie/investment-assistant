@@ -90,4 +90,3 @@ def redact_secrets(value, environ=None):
         return _ASSIGNMENT.sub(_redacted_assignment, item)
 
     return redact(value)
-

@@ -178,6 +178,28 @@
 - 本次离线复验没有发送通知、创建 ChatGPT 任务或启动真实五日试验；这些状态不能
   从代码发布推断。后续云测只允许合成账户与 send_notification=false，真实验收仍为 0 天。
 
+### 发布后独立核验（2026-09-15）
+
+- 第二轮无父根已发布；随后通过独立网络 clone 核验公开源码，未复用原工作树的 Git 对象。
+  合成数据分支保持独立，未带入真实账户、私有状态或恢复包。
+- 独立公开副本全量离线回归：679 passed / 987 subtests passed；compileall、tabnanny 退出 0。
+  main 与 public-test-data 合计 149 个文件的敏感值/旧定位扫描无发现。
+- 全根差异检查额外发现三个继承的文件末尾空行，已删除并用空树对完整候选复验；
+  不只检查本次增量。收尾提交仅包含这些格式修复和交付记录，使用普通快进，不再次重写根。
+- [公开云测](https://github.com/WJAnnie/investment-assistant/actions/runs/34895349607)
+  使用 stage=all、send_notification=false，结果 success；通知步骤为 skipped，不是 accepted。
+  四份实际公开 JSON 已在独立副本逐一校验：manual_replay、WAIT、score=null、
+  auto_trade_enabled=false、real_account_trial_day=false。公共行情为 available_unverified，
+  不是来源时间已验证或完整分析就绪。Windows 管道复验显式使用 Python UTF-8 模式。
+- 收尾时公开运行仅一条上述安全云测，缓存和产物均为 0；旧账户导出工作流仍停用，
+  合成测试工作流仍启用。没有补发通知或启动本机调度。
+- 匿名 HEAD 重新确认旧敏感配置的服务器对象仍返回 200；未下载或展示正文，
+  定位信息只留在私有 Support 草稿。引用/旧运行清理不等于服务器对象已清除，
+  GitHub Support 工单尚未提交，不能宣称旧公开内容已彻底消失。
+- ChatGPT 桥接仍为 NEEDS_BROWSER，未创建自动提醒；完整分析所需来源尚未接通，
+  full_analysis_ready=false、observer data_complete=false。无常驻私有执行主机，
+  真实五日验收为 0 天、未开始；账本最多 pending_verification，不能标记 passed。
+
 官方依据：
 
 - [OpenAI Scheduled tasks](https://learn.chatgpt.com/docs/automations)：本地项目任务需电脑和应用保持运行；
