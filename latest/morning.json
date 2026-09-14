@@ -1,0 +1,119 @@
+{
+  "schema_version": "public-trial/v1",
+  "data_classification": "public_market_and_synthetic_test",
+  "purpose": "delivery_test_not_investment_advice",
+  "stage": "morning",
+  "execution_mode": "manual_replay",
+  "requested_at": "2026-09-15T00:25:13.635032+08:00",
+  "generated_at": "2026-09-15T00:25:16.073693+08:00",
+  "scheduled_for": "2026-09-15T09:00:00+08:00",
+  "timing_status": "manual_replay",
+  "coverage": {
+    "global_markets": "NOT_IMPLEMENTED",
+    "industry_ranking": "NOT_IMPLEMENTED",
+    "morning_baseline": "MISSING",
+    "multi_timeframe": "NOT_IMPLEMENTED",
+    "prediction_pairing": "MISSING",
+    "exchange_calendar": "NOT_IMPLEMENTED"
+  },
+  "synthetic_account": {
+    "id": "SIMULATED-ONLY",
+    "positions": [
+      {
+        "symbol": "DEMO_A",
+        "weight_pct": 10
+      },
+      {
+        "symbol": "DEMO_B",
+        "weight_pct": 5
+      }
+    ],
+    "cash_pct": 85
+  },
+  "decision": {
+    "action": "WAIT",
+    "position_change_pct": 0,
+    "score": null,
+    "manual_confirmation_required": true,
+    "auto_trade_enabled": false
+  },
+  "real_account_trial_day": false,
+  "market": {
+    "source": "sina_public",
+    "status": "available_unverified",
+    "quotes": [
+      {
+        "code": "SH.000001",
+        "name": "上证指数",
+        "price": 3885.3328,
+        "change_pct": -0.07,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SZ.399001",
+        "name": "深证成指",
+        "price": 13384.57,
+        "change_pct": -0.64,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SZ.399006",
+        "name": "创业板指",
+        "price": 3285.58,
+        "change_pct": -1.1,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000688",
+        "name": "科创50",
+        "price": 1528.2661,
+        "change_pct": -1.62,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000905",
+        "name": "中证500",
+        "price": 7571.2002,
+        "change_pct": -0.12,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000300",
+        "name": "沪深300",
+        "price": 4480.0821,
+        "change_pct": -0.67,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000016",
+        "name": "上证50",
+        "price": 2861.0496,
+        "change_pct": -0.25,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SZ.399005",
+        "name": "中小100",
+        "price": 8260.01,
+        "change_pct": -0.8,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      }
+    ]
+  }
+}
