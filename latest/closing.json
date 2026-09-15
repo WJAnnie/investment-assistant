@@ -3,11 +3,11 @@
   "data_classification": "public_market_and_synthetic_test",
   "purpose": "delivery_test_not_investment_advice",
   "stage": "closing",
-  "execution_mode": "manual_replay",
-  "requested_at": "2026-09-15T04:51:01.725023+08:00",
-  "generated_at": "2026-09-15T04:51:07.454870+08:00",
+  "execution_mode": "scheduled",
+  "requested_at": "2026-09-15T21:28:47.431951+08:00",
+  "generated_at": "2026-09-15T21:28:49.348118+08:00",
   "scheduled_for": "2026-09-15T16:10:00+08:00",
-  "timing_status": "manual_replay",
+  "timing_status": "late",
   "coverage": {
     "global_markets": "NOT_IMPLEMENTED",
     "industry_ranking": "NOT_IMPLEMENTED",
@@ -45,8 +45,8 @@
       {
         "code": "SH.000001",
         "name": "上证指数",
-        "price": 3885.3328,
-        "change_pct": -0.07,
+        "price": 3864.2794,
+        "change_pct": -0.54,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -54,8 +54,8 @@
       {
         "code": "SZ.399001",
         "name": "深证成指",
-        "price": 13384.57,
-        "change_pct": -0.64,
+        "price": 13287.97,
+        "change_pct": -0.72,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -63,8 +63,8 @@
       {
         "code": "SZ.399006",
         "name": "创业板指",
-        "price": 3285.58,
-        "change_pct": -1.1,
+        "price": 3247.92,
+        "change_pct": -1.15,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -72,8 +72,8 @@
       {
         "code": "SH.000688",
         "name": "科创50",
-        "price": 1528.2661,
-        "change_pct": -1.62,
+        "price": 1551.9581,
+        "change_pct": 1.55,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -81,8 +81,8 @@
       {
         "code": "SH.000905",
         "name": "中证500",
-        "price": 7571.2002,
-        "change_pct": -0.12,
+        "price": 7561.5909,
+        "change_pct": -0.13,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -90,7 +90,7 @@
       {
         "code": "SH.000300",
         "name": "沪深300",
-        "price": 4480.0821,
+        "price": 4450.0402,
         "change_pct": -0.67,
         "source_as_of": null,
         "freshness": "UNKNOWN",
@@ -99,8 +99,8 @@
       {
         "code": "SH.000016",
         "name": "上证50",
-        "price": 2861.0496,
-        "change_pct": -0.25,
+        "price": 2846.3073,
+        "change_pct": -0.52,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -108,8 +108,8 @@
       {
         "code": "SZ.399005",
         "name": "中小100",
-        "price": 8260.01,
-        "change_pct": -0.8,
+        "price": 8221.64,
+        "change_pct": -0.46,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
