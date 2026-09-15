@@ -10,7 +10,7 @@ DEMO_A / DEMO_B 合成账户，不读取真实持仓、成本或现金，不提�
 原运行元数据可以定位旧源码树，现已纳入专项历史清理；日志和元数据仅保存在私有恢复副本。
 这里不再散发旧源码提交或运行页面链接。
 
-- 四场景每次均得到 8/8 个数值有效的公共指数，来源时间和新鲜度仍未经验证。
+- 首轮四场景每次均得到 8/8 个数值有效的国内公共指数；当时全球行情尚未接入。
 - public-test-data 使用独立无父根，只有 README 和四份 JSON；不继承源码历史。
 - 当时只发送一条合并合成测试消息；API 接受不等于设备显示、已读或 ChatGPT 消费。
 - 四时点 cron 已配置，但其准点性不能由一次手动回放证明。真实账户验收天数仍为 0。
@@ -21,7 +21,7 @@ DEMO_A / DEMO_B 合成账户，不读取真实持仓、成本或现金，不提�
 
 | 北京时间（周一至周五） | 场景 | 当前公开测试内容 |
 | --- | --- | --- |
-| 09:00 | 晨报 | 国内公共指数观测；全球市场、行业评分明确标记未接入 |
+| 09:00 | 晨报 | 国内公共指数；8 项隔夜全球公共观测、较前值变化与数据时间；行业评分仍未接入 |
 | 11:30 | 午盘变化 | 缺少可靠晨报基线，明确标记无法比较，不用成本收益替代时段变化 |
 | 14:30 | 核心决策 | 合成账户 WAIT；没有评分或多周期确认，不编造二买信号 |
 | 16:10 | 收盘复盘 | 缺少事前判断配对，明确标记无法评价，不擅自调整模型 |
@@ -34,6 +34,13 @@ GitHub Actions 定时任务可能排队、延迟甚至被跳过，不保证准�
 Sina 当前指数接口没有可靠的来源时间。即使请求成功，仍然保留
 source_as_of=null、freshness=UNKNOWN，不能声称行情实时或可用于交易。
 网络失败、空行情和非法数值使用固定错误码，不把原始响应或异常写入公开报告。
+
+晨报全球观测固定为 `^GSPC`、`^DJI`、`^IXIC`、`^SOX`、`^TNX`、
+`DX-Y.NYB`、`GC=F` 和 `CL=F`。Yahoo Chart 无密钥公共接口是主源；它未经本项目认证，
+可能限流、延迟或改变结构，因此通知只写“较前值”，不冒充已确认收盘或官方实时行情。
+`^TNX` 主源失败时才尝试 FRED `DGS10`；FRED 仅提供日期级日频数据，不编造盘中时分秒。
+每个标的独立降级，单项失败显示“暂不可用”，不会阻断其余项目或改变 WAIT。
+11:30、14:30、16:10 不重复请求全球源，快照明确记录该阶段未采集。
 
 ## 工作流与公开产物
 
@@ -93,6 +100,7 @@ GitHub 发布成功不等于 ChatGPT 自动读取。本入口没有 ChatGPT Task
 
 ~~~text
 python -m unittest discover -s tests -p "test_public_trial*.py"
+python -m unittest discover -s tests -p "test_global_markets.py"
 python -m unittest discover -s tests -p "test_feishu.py"
 python -m app.integration.public_trial collect --stage all --output <新的空报告目录>
 python -m app.integration.public_trial validate --input <报告目录>

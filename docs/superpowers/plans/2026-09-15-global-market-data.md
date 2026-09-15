@@ -113,7 +113,7 @@ git commit -m "Make exact overnight instruments independently observable" \
 
 ```python
 def test_fred_returns_last_two_numeric_dgs10_observations(self):
-    csv_body = b"DATE,DGS10\n2026-09-10,4.95\n2026-09-11,4.96\n2026-09-14,.\n"
+    csv_body = b"observation_date,DGS10\n2026-09-10,4.95\n2026-09-11,4.96\n2026-09-14,.\n"
     quote = FredTreasuryProvider(session=FakeSession(csv_body)).fetch("^TNX")
     self.assertEqual(quote.value, 4.96)
     self.assertEqual(quote.previous_value, 4.95)
@@ -305,9 +305,9 @@ Run `public_trial collect --stage morning --mode manual_replay` into a newly cre
 
 Expected: at least one valid global observation; any failed symbol has a fixed error code and the process still produces a valid WAIT snapshot.
 
-- [ ] **Step 4: Request Antigravity review**
+- [ ] **Step 4: Perform root-agent review and evidence-based verification**
 
-Run a read-only `agy -p` review over the changed adapter, integration, tests and workflow. Require severity-ranked file/line findings for parser trust boundaries, timestamps, unit semantics, v1/v2 migration, secret isolation, and failure containment. Fix every confirmed P0/P1 issue and rerun the focused plus full suites.
+The root Codex session reviews the actual diff for parser trust boundaries, timestamps, unit semantics, v1/v2 migration, secret isolation, and failure containment. Antigravity may only be assigned concrete code/test fixes that modify files and run tests; it must not receive a read-only review task. Fix every confirmed issue, rerun the focused plus full suites, and perform the bounded live smoke test before completion.
 
 - [ ] **Step 5: Commit documentation and verification state**
 
