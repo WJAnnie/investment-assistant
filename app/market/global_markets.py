@@ -140,10 +140,14 @@ def _number(value):
     """Accept only a real JSON number that is finite and strictly positive."""
     if type(value) not in (int, float):
         raise GlobalMarketDataError(ERROR_INVALID_VALUE) from None
+    conversion_failed = False
     try:
         result = float(value)
     except (OverflowError, ValueError):
-        # Arbitrarily large JSON integers cannot become a usable price.
+        # Arbitrarily large JSON integers cannot become a usable price. Raise
+        # outside this handler so the conversion exception is not retained.
+        conversion_failed = True
+    if conversion_failed:
         raise GlobalMarketDataError(ERROR_INVALID_VALUE) from None
     if not math.isfinite(result) or result <= 0:
         raise GlobalMarketDataError(ERROR_INVALID_VALUE) from None
@@ -166,17 +170,24 @@ def _strict_object(pairs):
 
 
 def _decode_json(body):
+    malformed = False
     try:
         text = body.decode("utf-8")
     except (UnicodeDecodeError, AttributeError):
+        malformed = True
+    if malformed:
         raise GlobalMarketDataError(ERROR_MALFORMED) from None
+
     try:
-        return json.loads(text, object_pairs_hook=_strict_object,
-                          parse_constant=_reject_constant)
+        payload = json.loads(text, object_pairs_hook=_strict_object,
+                             parse_constant=_reject_constant)
     except GlobalMarketDataError:
         raise
     except (ValueError, TypeError, RecursionError):
+        malformed = True
+    if malformed:
         raise GlobalMarketDataError(ERROR_MALFORMED) from None
+    return payload
 
 
 def _close(response):
@@ -211,14 +222,18 @@ class YahooGlobalMarketProvider:
         return self._parse(body, symbol, entry)
 
     def _get(self, url, params):
+        transport_failed = False
         try:
             response = self.session.get(url, params=params,
                                         headers=dict(_REQUEST_HEADERS),
-                                        timeout=self.timeout, allow_redirects=False)
+                                        timeout=self.timeout, allow_redirects=False,
+                                        stream=True)
         except GlobalMarketDataError:
             raise
         except Exception:
             # Provider exception text can contain the URL or credentials.
+            transport_failed = True
+        if transport_failed:
             raise GlobalMarketDataError(ERROR_NETWORK) from None
         try:
             status = getattr(response, "status_code", None)
@@ -263,7 +278,9 @@ class YahooGlobalMarketProvider:
         chart = payload.get("chart")
         if type(chart) is not dict:
             raise GlobalMarketDataError(ERROR_MALFORMED) from None
-        if chart.get("error") is not None:
+        if "error" not in chart:
+            raise GlobalMarketDataError(ERROR_MALFORMED) from None
+        if chart["error"] is not None:
             raise GlobalMarketDataError(ERROR_SOURCE_ERROR) from None
         result = chart.get("result")
         if type(result) is not list or len(result) != 1 or type(result[0]) is not dict:
@@ -308,15 +325,17 @@ def _strict_daily_pairs(series):
         raise GlobalMarketDataError(ERROR_MALFORMED) from None
 
     pairs = []
+    previous_epoch = None
     for seconds, close in zip(timestamps, closes):
+        _epoch_to_iso(seconds)  # Validate timestamps even when the close is null.
+        if previous_epoch is not None and seconds <= previous_epoch:
+            # Duplicated or unsorted history cannot identify "latest".
+            raise GlobalMarketDataError(ERROR_INVALID_TIME) from None
+        previous_epoch = seconds
         if close is None:
             # A closed session legitimately has no close price.
             continue
         value = _number(close)
-        _epoch_to_iso(seconds)  # Raises INVALID_TIME for absurd timestamps.
-        if pairs and seconds <= pairs[-1][0]:
-            # Duplicated or unsorted history cannot identify "latest".
-            raise GlobalMarketDataError(ERROR_INVALID_TIME) from None
         pairs.append((seconds, value))
     if len(pairs) < 2:
         raise GlobalMarketDataError(ERROR_INSUFFICIENT) from None

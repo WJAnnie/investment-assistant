@@ -153,8 +153,9 @@ class GlobalMarketProviderTests(unittest.TestCase):
         self.assertEqual(failure.code, code)
         self.assertIn(code, gm.ERROR_CODES)
         self.assertEqual(str(failure), code)
-        # No chained cause means no remote exception text can surface later.
+        # Neither cause nor context may retain remote text for later inspection.
         self.assertIsNone(failure.__cause__)
+        self.assertIsNone(failure.__context__)
         # One bounded attempt per symbol: the adapter has no retry loop.
         self.assertEqual(len(self.session.calls), 1)
         return failure
@@ -170,6 +171,11 @@ class GlobalMarketProviderTests(unittest.TestCase):
         self.assertEqual(quote.session_date, "2026-09-14")
         self.assertEqual(quote.source_as_of, "2026-09-14T20:00:00+00:00")
         self.assertEqual(session.calls[0]["timeout"], 10)
+
+    def test_observation_has_exactly_six_dataclass_fields(self):
+        self.assertEqual(tuple(gm.SourceObservation.__dataclass_fields__), (
+            "symbol", "value", "previous_value", "source_as_of", "session_date", "source",
+        ))
 
     def test_request_uses_the_fixed_host_encoded_symbol_and_bounded_options(self):
         quote = self.observation("^GSPC", yahoo_payload("^GSPC"))
@@ -187,6 +193,30 @@ class GlobalMarketProviderTests(unittest.TestCase):
         for name, value in call["headers"].items():
             self.assertNotIn(SECRET_HEADER_VALUE, f"{name}:{value}")
             self.assertNotIn(name.lower(), {"authorization", "cookie", "proxy-authorization"})
+
+    def test_equals_in_symbol_is_percent_encoded(self):
+        self.observation("GC=F", yahoo_payload("GC=F", [2500.0, 2510.5]))
+        self.assertEqual(
+            self.session.calls[0]["url"],
+            "https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF",
+        )
+
+    def test_rejects_success_statuses_without_a_valid_payload(self):
+        for status_code in (201, 204):
+            with self.subTest(status_code=status_code):
+                self.assertFails(gm.ERROR_HTTP_STATUS, yahoo_payload(), status_code=status_code)
+
+    def test_accepts_exactly_one_megabyte_body(self):
+        payload = yahoo_payload()
+        body = payload + b" " * (gm.MAX_BODY_BYTES - len(payload))
+        self.assertEqual(len(body), gm.MAX_BODY_BYTES)
+        self.observation("^GSPC", body)
+
+    def test_returns_the_final_two_valid_closes_from_longer_history(self):
+        closes = [100.0, None, 101.0, None, 102.0, 103.0]
+        timestamps = [epoch(day) for day in SESSIONS] + [epoch(SESSIONS[-1], CLOSE_UTC)]
+        quote = self.observation("^GSPC", yahoo_payload("^GSPC", closes, timestamps=timestamps))
+        self.assertEqual((quote.previous_value, quote.value), (102.0, 103.0))
 
     def test_keeps_multi_character_symbols_intact_and_type_strict(self):
         session = FakeSession(yahoo_payload("DX-Y.NYB", [100.0, 101.0]))
@@ -319,6 +349,25 @@ class GlobalMarketProviderTests(unittest.TestCase):
         self.assertFails(gm.ERROR_SOURCE_ERROR,
                          yahoo_payload(chart_error={"code": "Not Found",
                                                     "description": SECRET_REMOTE_TEXT}))
+
+    def test_rejects_duplicate_json_keys(self):
+        body = b'{"chart":{"error":null,"error":null,"result":[]}}'
+        self.assertFails(gm.ERROR_MALFORMED, body)
+
+    def test_requires_explicit_null_chart_error_field(self):
+        payload = base_payload()
+        payload["chart"].pop("error")
+        self.assertFails(gm.ERROR_MALFORMED, encode(payload))
+
+    def test_validates_timestamps_even_when_close_is_null(self):
+        timestamps = [epoch(SESSIONS[0]), 10 ** 30, epoch(SESSIONS[-1])]
+        self.assertFails(gm.ERROR_INVALID_TIME,
+                         encode(base_payload(closes=[100.0, None, 102.0],
+                                             timestamps=timestamps)))
+
+    def test_request_streams_response_body(self):
+        self.observation("^GSPC", yahoo_payload())
+        self.assertIs(self.session.calls[0]["stream"], True)
 
     def test_rejects_missing_or_broken_series_shapes(self):
         shapes = (
