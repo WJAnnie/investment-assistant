@@ -344,6 +344,7 @@ class GlobalMarketProviderTests(unittest.TestCase):
     def test_rejects_non_standard_json_constants(self):
         self.assertFails(gm.ERROR_MALFORMED, yahoo_raw_payload(closes_json="[100.0, null, NaN]"))
         self.assertFails(gm.ERROR_MALFORMED, yahoo_raw_payload(closes_json="[100.0, null, Infinity]"))
+        self.assertFails(gm.ERROR_MALFORMED, yahoo_raw_payload(closes_json="[100.0, null, -Infinity]"))
 
     def test_rejects_source_reported_errors(self):
         self.assertFails(gm.ERROR_SOURCE_ERROR,
