@@ -18,6 +18,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from app.integration import public_trial as trial
+from app.market.global_markets import INSTRUMENTS, SourceObservation
 from app.market.models import Quote
 
 
@@ -30,16 +31,21 @@ SECRET_NAME = "SECRET-QUOTE-NAME-7b2a"
 AUTO = object()
 STAGE_CLOCKS = {"morning": "09:00", "midday": "11:30", "decision": "14:30", "closing": "16:10"}
 COVERAGE = {
-    "global_markets": "NOT_IMPLEMENTED", "industry_ranking": "NOT_IMPLEMENTED",
+    "global_markets": "PUBLIC_OBSERVATIONS", "industry_ranking": "NOT_IMPLEMENTED",
     "morning_baseline": "MISSING", "multi_timeframe": "NOT_IMPLEMENTED",
     "prediction_pairing": "MISSING", "exchange_calendar": "NOT_IMPLEMENTED",
 }
 TOP_FIELDS = {
     "schema_version", "data_classification", "purpose", "stage", "execution_mode",
     "requested_at", "generated_at", "scheduled_for", "timing_status", "market",
-    "coverage", "synthetic_account", "decision", "real_account_trial_day",
+    "global_market", "coverage", "synthetic_account", "decision", "real_account_trial_day",
 }
 QUOTE_FIELDS = {"code", "name", "price", "change_pct", "source_as_of", "freshness", "error_code"}
+GLOBAL_FIELDS = {
+    "category", "symbol", "name", "value", "previous_value", "value_unit",
+    "change", "change_unit", "source", "source_as_of", "session_date",
+    "freshness", "error_code",
+}
 SYNTHETIC = {
     "id": "SIMULATED-ONLY",
     "positions": [{"symbol": "DEMO_A", "weight_pct": 10}, {"symbol": "DEMO_B", "weight_pct": 5}],
@@ -91,13 +97,43 @@ class FakeProvider:
                                                      else quote_for(code))
 
 
-def build(stage="morning", *, provider=None, minutes=0, day=MONDAY, after=1,
+class FakeGlobalProvider:
+    def __init__(self, overrides=None):
+        self.calls = []
+        self.overrides = dict(overrides or {})
+
+    def fetch(self, symbol):
+        self.calls.append(symbol)
+        if symbol in self.overrides:
+            value = self.overrides[symbol]
+            return value(symbol) if callable(value) else value
+        return SourceObservation(
+            symbol=symbol,
+            value=4.61 if symbol == "^TNX" else 102.0,
+            previous_value=4.60 if symbol == "^TNX" else 100.0,
+            source_as_of="2026-09-14T00:00:00+00:00",
+            session_date="2026-09-13",
+            source="yahoo_chart",
+        )
+
+
+class FailingGlobalProvider(FakeGlobalProvider):
+    def fetch(self, symbol):
+        self.calls.append(symbol)
+        raise RuntimeError(SECRET)
+
+
+def build(stage="morning", *, provider=None, global_provider=None,
+          treasury_fallback=None, minutes=0, day=MONDAY, after=1,
           mode="scheduled", generated_at=AUTO):
     requested = slot(stage, day) + timedelta(minutes=minutes)
     kwargs = {} if generated_at is AUTO and after is None else {"generated_at": (
         requested + timedelta(minutes=after) if generated_at is AUTO else generated_at)}
-    return trial.build_snapshot(stage, provider=provider or FakeProvider(),
-                               requested_at=requested, execution_mode=mode, **kwargs)
+    return trial.build_snapshot(
+        stage, provider=provider or FakeProvider(),
+        global_provider=global_provider or FakeGlobalProvider(),
+        treasury_fallback=treasury_fallback or FailingGlobalProvider(),
+        requested_at=requested, execution_mode=mode, **kwargs)
 
 
 def manual():
@@ -139,7 +175,196 @@ def first_symbol():
     return list(trial.PUBLIC_SYMBOLS)[0]
 
 
+def legacy(payload=None):
+    result = json.loads(json.dumps(scheduled() if payload is None else payload))
+    result["schema_version"] = "public-trial/v1"
+    result["coverage"]["global_markets"] = "NOT_IMPLEMENTED"
+    result.pop("global_market")
+    return result
+
+
 class ContractTests(unittest.TestCase):
+    def test_v2_morning_collects_exact_global_instruments_without_enabling_trade(self):
+        yahoo = FakeGlobalProvider()
+        fallback = FailingGlobalProvider()
+        payload = build(global_provider=yahoo, treasury_fallback=fallback)
+
+        self.assertEqual(payload["schema_version"], "public-trial/v2")
+        self.assertEqual(
+            [item["symbol"] for item in payload["global_market"]["quotes"]],
+            list(INSTRUMENTS),
+        )
+        treasury = next(item for item in payload["global_market"]["quotes"]
+                        if item["symbol"] == "^TNX")
+        self.assertEqual(treasury["change_unit"], "bp")
+        self.assertAlmostEqual(treasury["change"], 1.0)
+        self.assertEqual(payload["decision"]["action"], "WAIT")
+        self.assertIs(payload["decision"]["auto_trade_enabled"], False)
+        self.assertEqual(yahoo.calls, list(INSTRUMENTS))
+        self.assertEqual(fallback.calls, [])
+
+    def test_one_global_symbol_failure_is_isolated(self):
+        failed = "^SOX"
+        yahoo = FakeGlobalProvider({
+            failed: lambda _symbol: (_ for _ in ()).throw(RuntimeError(SECRET)),
+        })
+        payload = build(global_provider=yahoo)
+        records = {item["symbol"]: item for item in payload["global_market"]["quotes"]}
+        self.assertEqual(payload["global_market"]["status"], "partial")
+        self.assertEqual(records[failed]["error_code"], "PROVIDER_UNAVAILABLE")
+        self.assertIsNone(records[failed]["value"])
+        self.assertIsNone(records["^GSPC"]["error_code"])
+        self.assertNotIn(SECRET, json.dumps(payload, ensure_ascii=False))
+
+    def test_treasury_uses_fred_only_after_yahoo_failure(self):
+        yahoo = FakeGlobalProvider({
+            "^TNX": lambda _symbol: (_ for _ in ()).throw(RuntimeError(SECRET)),
+        })
+        fred = FakeGlobalProvider({
+            "^TNX": SourceObservation(
+                symbol="^TNX", value=4.61, previous_value=4.60,
+                source_as_of=None, session_date="2026-09-13", source="fred_dgs10"),
+        })
+        payload = build(global_provider=yahoo, treasury_fallback=fred)
+        treasury = next(item for item in payload["global_market"]["quotes"]
+                        if item["symbol"] == "^TNX")
+        self.assertEqual(payload["global_market"]["status"], "complete")
+        self.assertEqual(fred.calls, ["^TNX"])
+        self.assertEqual(treasury["source"], "fred_dgs10")
+        self.assertIsNone(treasury["source_as_of"])
+        self.assertEqual(treasury["freshness"], "RECENT")
+        self.assertAlmostEqual(treasury["change"], 1.0)
+
+    def test_treasury_double_failure_is_fixed_and_does_not_leak(self):
+        yahoo = FakeGlobalProvider({
+            "^TNX": lambda _symbol: (_ for _ in ()).throw(RuntimeError(SECRET)),
+        })
+        fred = FailingGlobalProvider()
+        payload = build(global_provider=yahoo, treasury_fallback=fred)
+        treasury = next(item for item in payload["global_market"]["quotes"]
+                        if item["symbol"] == "^TNX")
+        self.assertEqual(payload["global_market"]["status"], "partial")
+        self.assertEqual(treasury["error_code"], "TREASURY_SOURCES_UNAVAILABLE")
+        self.assertEqual(fred.calls, ["^TNX"])
+        self.assertNotIn(SECRET, json.dumps(payload, ensure_ascii=False))
+
+    def test_all_global_sources_failure_is_unavailable_but_still_wait(self):
+        yahoo, fred = FailingGlobalProvider(), FailingGlobalProvider()
+        payload = build(global_provider=yahoo, treasury_fallback=fred)
+        self.assertEqual(payload["global_market"]["status"], "unavailable")
+        self.assertTrue(all(item["error_code"] is not None
+                            for item in payload["global_market"]["quotes"]))
+        self.assertEqual(payload["decision"], DECISION)
+        self.assertNotIn(SECRET, json.dumps(payload, ensure_ascii=False))
+
+    def test_global_freshness_handles_delayed_stale_and_future(self):
+        cases = {
+            "delayed": ("2026-09-11T23:00:00+00:00", "DELAYED_OR_HOLIDAY", None),
+            "stale": ("2026-09-08T00:00:00+00:00", "STALE", None),
+            "future": ("2026-09-14T01:07:00+00:00", None, "INVALID_SOURCE_TIME"),
+        }
+        for name, (as_of, freshness, error) in cases.items():
+            with self.subTest(name=name):
+                observation = SourceObservation(
+                    symbol="^GSPC", value=102, previous_value=100,
+                    source_as_of=as_of, session_date="2026-09-13", source="yahoo_chart")
+                payload = build(global_provider=FakeGlobalProvider({"^GSPC": observation}), after=1)
+                record = payload["global_market"]["quotes"][0]
+                self.assertEqual(record["freshness"], freshness)
+                self.assertEqual(record["error_code"], error)
+
+    def test_global_freshness_boundaries_are_inclusive(self):
+        generated = slot("morning")
+        generated_utc = generated.astimezone(ZoneInfo("UTC"))
+        cases = (
+            (generated_utc - timedelta(hours=36), "RECENT"),
+            (generated_utc - timedelta(hours=36, seconds=1), "DELAYED_OR_HOLIDAY"),
+            (generated_utc - timedelta(hours=120), "DELAYED_OR_HOLIDAY"),
+            (generated_utc - timedelta(hours=120, seconds=1), "STALE"),
+            (generated_utc + timedelta(minutes=5), "RECENT"),
+        )
+        for source_time, expected in cases:
+            with self.subTest(source_time=source_time):
+                observation = SourceObservation(
+                    "^GSPC", 102, 100, source_time.isoformat(),
+                    source_time.date().isoformat(), "yahoo_chart")
+                payload = build(
+                    global_provider=FakeGlobalProvider({"^GSPC": observation}),
+                    generated_at=generated,
+                )
+                self.assertEqual(payload["global_market"]["quotes"][0]["freshness"], expected)
+
+    def test_fred_date_only_freshness_does_not_invent_a_timestamp(self):
+        yahoo = FakeGlobalProvider({
+            "^TNX": lambda _symbol: (_ for _ in ()).throw(RuntimeError(SECRET)),
+        })
+        cases = (
+            ("2026-09-08", "STALE", None),
+            ("2026-09-15", None, "INVALID_SOURCE_TIME"),
+        )
+        for session_date, freshness, error in cases:
+            with self.subTest(session_date=session_date):
+                fred = FakeGlobalProvider({
+                    "^TNX": SourceObservation(
+                        "^TNX", 4.61, 4.60, None, session_date, "fred_dgs10"),
+                })
+                payload = build(global_provider=yahoo, treasury_fallback=fred)
+                record = payload["global_market"]["quotes"][4]
+                self.assertIsNone(record["source_as_of"])
+                self.assertEqual(record["freshness"], freshness)
+                self.assertEqual(record["error_code"], error)
+
+    def test_yahoo_transport_cannot_spoof_a_fred_observation(self):
+        spoofed = SourceObservation(
+            "^TNX", 4.61, 4.60, None, "2026-09-13", "fred_dgs10")
+        payload = build(global_provider=FakeGlobalProvider({"^TNX": spoofed}))
+        record = payload["global_market"]["quotes"][4]
+        self.assertEqual(record["error_code"], "INVALID_OBSERVATION")
+        self.assertIsNone(record["source"])
+
+    def test_invalid_observations_fail_one_record_closed(self):
+        invalid = (
+            object(),
+            SourceObservation("^DJI", 102, 100, "2026-09-14T00:00:00+00:00", "2026-09-13", "yahoo_chart"),
+            SourceObservation("^GSPC", True, 100, "2026-09-14T00:00:00+00:00", "2026-09-13", "yahoo_chart"),
+            SourceObservation("^GSPC", 102, 0, "2026-09-14T00:00:00+00:00", "2026-09-13", "yahoo_chart"),
+            SourceObservation("^GSPC", 102, 100, None, "2026-09-13", "yahoo_chart"),
+            SourceObservation("^GSPC", 102, 100, "2026-09-14T00:00:00Z", "2026-09-13", "yahoo_chart"),
+            SourceObservation("^GSPC", 102, 100, "2026-09-14T00:00:00+00:00", "2026-02-30", "yahoo_chart"),
+            SourceObservation("^GSPC", 102, 100, "2026-09-14T00:00:00+00:00", "2026-09-13", SECRET),
+        )
+        for observation in invalid:
+            with self.subTest(observation=observation):
+                payload = build(global_provider=FakeGlobalProvider({"^GSPC": observation}))
+                record = payload["global_market"]["quotes"][0]
+                self.assertEqual(record["error_code"], "INVALID_OBSERVATION")
+                self.assertIsNone(record["source"])
+                self.assertNotIn(SECRET, json.dumps(payload, ensure_ascii=False))
+
+    def test_non_morning_stages_never_call_global_providers(self):
+        for stage in ("midday", "decision", "closing"):
+            with self.subTest(stage=stage):
+                yahoo, fred = FakeGlobalProvider(), FakeGlobalProvider()
+                payload = build(stage, global_provider=yahoo, treasury_fallback=fred)
+                self.assertEqual(yahoo.calls, [])
+                self.assertEqual(fred.calls, [])
+                self.assertEqual(payload["global_market"]["status"], "not_collected")
+                self.assertEqual(
+                    {item["error_code"] for item in payload["global_market"]["quotes"]},
+                    {"NOT_COLLECTED_FOR_STAGE"},
+                )
+
+    def test_non_morning_validation_rejects_a_success_record_in_every_slot(self):
+        successful_records = build("morning")["global_market"]["quotes"]
+        for stage in ("midday", "decision", "closing"):
+            for index, successful in enumerate(successful_records):
+                with self.subTest(stage=stage, symbol=successful["symbol"]):
+                    payload = build(stage)
+                    payload["global_market"]["quotes"][index] = dict(successful)
+                    self.assertEqual(payload["global_market"]["status"], "not_collected")
+                    with self.assertRaises(ValueError):
+                        trial.validate_snapshot(payload)
+
     def test_stages_and_public_symbols_are_fixed(self):
         self.assertEqual(set(trial.STAGES), set(STAGE_CLOCKS))
         for stage, expected in STAGE_CLOCKS.items():
@@ -156,7 +381,7 @@ class ContractTests(unittest.TestCase):
     def test_top_level_schema_coverage_account_and_decision_are_exact(self):
         payload = scheduled()
         self.assertEqual(set(payload), TOP_FIELDS)
-        self.assertEqual(payload["schema_version"], "public-trial/v1")
+        self.assertEqual(payload["schema_version"], "public-trial/v2")
         self.assertEqual(payload["data_classification"], "public_market_and_synthetic_test")
         self.assertEqual(payload["purpose"], "delivery_test_not_investment_advice")
         self.assertEqual(payload["stage"], "morning")
@@ -166,6 +391,11 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(payload["synthetic_account"], SYNTHETIC)
         self.assertEqual(payload["decision"], DECISION)
         self.assertEqual(payload["market"]["source"], "sina_public")
+        self.assertEqual(payload["global_market"]["status"], "complete")
+        self.assertEqual(len(payload["global_market"]["quotes"]), len(INSTRUMENTS))
+        for symbol, record in zip(INSTRUMENTS, payload["global_market"]["quotes"]):
+            self.assertEqual(set(record), GLOBAL_FIELDS)
+            self.assertEqual(record["symbol"], symbol)
 
     def test_iso_times_use_beijing_offset_and_scheduled_slot(self):
         payload = build("midday", after=1)
@@ -280,13 +510,18 @@ class ContractTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case):
                 provider = FakeProvider()
+                global_provider = FakeGlobalProvider()
+                fallback = FakeGlobalProvider()
                 with self.assertRaises(ValueError):
                     trial.build_snapshot(
                         case.get("stage", "morning"), provider=provider,
+                        global_provider=global_provider, treasury_fallback=fallback,
                         requested_at=case.get("requested_at", slot("morning")),
                         generated_at=case.get("generated_at", slot("morning")),
                         execution_mode=case.get("mode", "manual_replay"))
                 self.assertEqual(provider.calls, [])
+                self.assertEqual(global_provider.calls, [])
+                self.assertEqual(fallback.calls, [])
 
     def test_default_generated_at_is_measured_after_fetching(self):
         observed = []
@@ -406,7 +641,7 @@ class ValidationTests(unittest.TestCase):
             "public_classification": [("data_classification", "public")],
             "missing_classification": [(("data_classification",), None)],
             "purpose": [("purpose", "investment_advice")],
-            "schema": [("schema_version", "public-trial/v2")],
+            "schema": [("schema_version", "public-trial/v3")],
             "mode": [("execution_mode", "automatic")],
             "quote_provider": [("market", "quotes", 0, "provider", SECRET)],
         }
@@ -463,6 +698,38 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assert_rejected(edits)
 
+    def test_validator_accepts_exact_v1_but_rejects_v2_fields_in_v1(self):
+        old = legacy()
+        self.assertIsNone(trial.validate_snapshot(old))
+
+        polluted = legacy()
+        polluted["global_market"] = scheduled()["global_market"]
+        with self.assertRaises(ValueError):
+            trial.validate_snapshot(polluted)
+
+    def test_validator_rejects_v2_global_shape_order_status_and_trade_pollution(self):
+        mutations = {
+            "missing_top": lambda item: item.pop("global_market"),
+            "extra_top": lambda item: item.__setitem__("global_extra", 1),
+            "missing_record_field": lambda item: item["global_market"]["quotes"][0].pop("source"),
+            "extra_record_field": lambda item: item["global_market"]["quotes"][0].__setitem__("raw", SECRET),
+            "reordered_records": lambda item: item["global_market"]["quotes"].reverse(),
+            "false_status": lambda item: item["global_market"].__setitem__("status", "complete-ish"),
+            "trade": lambda item: item["decision"].__setitem__("action", "ADD"),
+            "auto_trade": lambda item: item["decision"].__setitem__("auto_trade_enabled", True),
+            "arbitrary_error": lambda item: item["global_market"]["quotes"][0].update({
+                "value": None, "previous_value": None, "change": None, "source": None,
+                "source_as_of": None, "session_date": None, "freshness": None,
+                "error_code": SECRET,
+            }),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                payload = scheduled()
+                mutate(payload)
+                with self.assertRaises(ValueError):
+                    trial.validate_snapshot(payload)
+
     def test_render_report_validates_before_rendering(self):
         payload = tamper(manual(), ("decision", "action", "BUY"))
         with self.assertRaises(ValueError):
@@ -514,6 +781,29 @@ class WriteTests(unittest.TestCase):
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 trial.validate_snapshot(payload)
                 self.assertEqual(payload["stage"], stage)
+
+    def test_mixed_v1_v2_reports_are_read_and_rendered_without_mutation(self):
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            old = legacy(build("morning"))
+            before = json.dumps(old, ensure_ascii=False, sort_keys=True)
+            (output / "latest").mkdir(parents=True)
+            (output / "latest" / "morning.json").write_text(
+                json.dumps(old, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            trial.write_reports([build("midday")], output)
+
+            loaded = trial._read_reports(output)
+            self.assertEqual([item["schema_version"] for item in loaded],
+                             ["public-trial/v1", "public-trial/v2"])
+            persisted = json.loads((output / "latest" / "morning.json").read_text(encoding="utf-8"))
+            self.assertEqual(json.dumps(persisted, ensure_ascii=False, sort_keys=True), before)
+            self.assertNotIn("global_market", persisted)
+            self.assertIn("尚未接入", (output / "README.md").read_text(encoding="utf-8"))
+
+    def test_write_reports_refuses_legacy_snapshots_as_new_input(self):
+        with TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                trial.write_reports([legacy()], Path(directory) / "out")
 
     def test_write_reports_validates_the_whole_batch_before_writing(self):
         with TemporaryDirectory() as directory:

@@ -4,7 +4,7 @@ This is not the private-account exporter or the trading engine. Only the
 notify command imports a notifier or reads notification credentials.
 """
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import json
 import math
 import os
@@ -17,6 +17,12 @@ from urllib.parse import urlsplit
 import requests
 
 from app.market.sina import SinaProvider
+from app.market.global_markets import (
+    ERROR_CODES as GLOBAL_PROVIDER_ERRORS,
+    GlobalMarketDataError,
+    INSTRUMENTS,
+    SourceObservation,
+)
 
 
 SHANGHAI = timezone(timedelta(hours=8))
@@ -27,9 +33,20 @@ PUBLIC_SYMBOLS = {
     'SH.000905': '中证500', 'SH.000300': '沪深300',
     'SH.000016': '上证50', 'SZ.399005': '中小100',
 }
-SCHEMA_VERSION = 'public-trial/v1'
+LEGACY_SCHEMA_VERSION = 'public-trial/v1'
+SCHEMA_VERSION = 'public-trial/v2'
 DATA_CLASSIFICATION = 'public_market_and_synthetic_test'
 _ERRORS = {'NO_QUOTE', 'PROVIDER_UNAVAILABLE', 'INVALID_QUOTE'}
+GLOBAL_SYMBOLS = tuple(INSTRUMENTS)
+_GLOBAL_ERRORS = frozenset(GLOBAL_PROVIDER_ERRORS) | {
+    'PROVIDER_UNAVAILABLE', 'INVALID_OBSERVATION', 'INVALID_SOURCE_TIME',
+    'TREASURY_SOURCES_UNAVAILABLE', 'NOT_COLLECTED_FOR_STAGE',
+}
+_GLOBAL_FIELDS = (
+    'category', 'symbol', 'name', 'value', 'previous_value', 'value_unit',
+    'change', 'change_unit', 'source', 'source_as_of', 'session_date',
+    'freshness', 'error_code',
+)
 _TITLES = {'morning': '晨报', 'midday': '午盘变化', 'decision': '核心决策', 'closing': '收盘复盘'}
 _TIMING_LABELS = {
     'manual_replay': '手动演练',
@@ -77,7 +94,7 @@ def _parse_time(value):
     return result
 
 
-def _metadata(stage, requested_at, generated_at, execution_mode):
+def _metadata(stage, requested_at, generated_at, execution_mode, *, schema_version=SCHEMA_VERSION):
     if type(stage) is not str or stage not in STAGES:
         _invalid()
     if execution_mode not in ('manual_replay', 'scheduled'):
@@ -97,14 +114,18 @@ def _metadata(stage, requested_at, generated_at, execution_mode):
         timing = 'late'
     else:
         timing = 'on_time'
+    if schema_version not in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
+        _invalid()
     return {
-        'schema_version': SCHEMA_VERSION, 'data_classification': DATA_CLASSIFICATION,
+        'schema_version': schema_version, 'data_classification': DATA_CLASSIFICATION,
         'purpose': 'delivery_test_not_investment_advice', 'stage': stage,
         'execution_mode': execution_mode, 'requested_at': requested_at.isoformat(),
         'generated_at': generated_at.isoformat(), 'scheduled_for': slot.isoformat(),
         'timing_status': timing,
         'coverage': {
-            'global_markets': 'NOT_IMPLEMENTED', 'industry_ranking': 'NOT_IMPLEMENTED',
+            'global_markets': ('NOT_IMPLEMENTED' if schema_version == LEGACY_SCHEMA_VERSION
+                               else 'PUBLIC_OBSERVATIONS'),
+            'industry_ranking': 'NOT_IMPLEMENTED',
             'morning_baseline': 'MISSING', 'multi_timeframe': 'NOT_IMPLEMENTED',
             'prediction_pairing': 'MISSING', 'exchange_calendar': 'NOT_IMPLEMENTED',
         },
@@ -158,13 +179,152 @@ def _market(quotes):
     return {'source': 'sina_public', 'status': status, 'quotes': quotes}
 
 
-def build_snapshot(stage, *, provider, requested_at, generated_at=None, execution_mode='manual_replay'):
+def _global_record(symbol, *, value=None, previous_value=None, change=None,
+                   source=None, source_as_of=None, session_date=None,
+                   freshness=None, error_code=None):
+    entry = INSTRUMENTS[symbol]
+    return {
+        'category': entry.category, 'symbol': symbol, 'name': entry.name,
+        'value': value, 'previous_value': previous_value,
+        'value_unit': entry.value_unit, 'change': change,
+        'change_unit': 'bp' if symbol == '^TNX' else 'pct',
+        'source': source, 'source_as_of': source_as_of,
+        'session_date': session_date, 'freshness': freshness,
+        'error_code': error_code,
+    }
+
+
+def _global_failure(symbol, error_code):
+    return _global_record(symbol, error_code=error_code)
+
+
+def _provider_error(error):
+    if isinstance(error, GlobalMarketDataError) and error.code in GLOBAL_PROVIDER_ERRORS:
+        return error.code
+    return 'PROVIDER_UNAVAILABLE'
+
+
+def _fetch_global_observations(global_provider, treasury_fallback):
+    observations = []
+    for symbol in GLOBAL_SYMBOLS:
+        try:
+            if global_provider is None:
+                raise RuntimeError
+            observation = global_provider.fetch(symbol)
+        except Exception as error:
+            if symbol != '^TNX':
+                observations.append((symbol, None, _provider_error(error), None))
+                continue
+            try:
+                if treasury_fallback is None:
+                    raise RuntimeError
+                observation = treasury_fallback.fetch(symbol)
+            except Exception:
+                observations.append((symbol, None, 'TREASURY_SOURCES_UNAVAILABLE', None))
+                continue
+            observations.append((symbol, observation, None, 'fred_dgs10'))
+            continue
+        observations.append((symbol, observation, None, 'yahoo_chart'))
+    return observations
+
+
+def _strict_date(value):
+    if type(value) is not str or len(value) != 10:
+        raise ValueError
+    parsed = date.fromisoformat(value)
+    if parsed.isoformat() != value:
+        raise ValueError
+    return parsed
+
+
+def _strict_source_time(value):
+    if type(value) is not str or len(value) > 40:
+        raise ValueError
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None or parsed.isoformat() != value:
+        raise ValueError
+    return parsed
+
+
+class _FutureSourceTime(ValueError):
+    pass
+
+
+def _freshness(source_time, generated_at):
+    age = generated_at.astimezone(timezone.utc) - source_time.astimezone(timezone.utc)
+    if age < -timedelta(minutes=5):
+        raise _FutureSourceTime
+    if age <= timedelta(hours=36):
+        return 'RECENT'
+    if age <= timedelta(hours=120):
+        return 'DELAYED_OR_HOLIDAY'
+    return 'STALE'
+
+
+def _observation_record(symbol, observation, generated_at, *, expected_source=None):
+    try:
+        if (type(observation) is not SourceObservation or observation.symbol != symbol
+                or (expected_source is not None and observation.source != expected_source)):
+            raise ValueError
+        if (not _finite_number(observation.value, positive=True)
+                or not _finite_number(observation.previous_value, positive=True)):
+            raise ValueError
+        session_day = _strict_date(observation.session_date)
+        if observation.source == 'yahoo_chart':
+            source_time = _strict_source_time(observation.source_as_of)
+        elif observation.source == 'fred_dgs10' and symbol == '^TNX' and observation.source_as_of is None:
+            source_time = datetime.combine(session_day, time(23, 59, 59), tzinfo=SHANGHAI)
+        else:
+            raise ValueError
+        freshness = _freshness(source_time, generated_at)
+        value, previous = float(observation.value), float(observation.previous_value)
+        change = ((value - previous) * 100 if symbol == '^TNX'
+                  else (value / previous - 1) * 100)
+        if not math.isfinite(change):
+            raise ValueError
+        return _global_record(
+            symbol, value=value, previous_value=previous, change=change,
+            source=observation.source, source_as_of=observation.source_as_of,
+            session_date=observation.session_date, freshness=freshness,
+        )
+    except _FutureSourceTime:
+        return _global_failure(symbol, 'INVALID_SOURCE_TIME')
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return _global_failure(symbol, 'INVALID_OBSERVATION')
+
+
+def _global_market(records, *, stage):
+    if stage != 'morning':
+        status = 'not_collected'
+    else:
+        count = sum(record['error_code'] is None for record in records)
+        status = ('complete' if count == len(GLOBAL_SYMBOLS)
+                  else 'partial' if count else 'unavailable')
+    return {'status': status, 'quotes': records}
+
+
+def build_snapshot(stage, *, provider, requested_at, generated_at=None,
+                   execution_mode='manual_replay', global_provider=None,
+                   treasury_fallback=None):
     # Validate intent BEFORE network requests. Capture completion afterwards,
     # without moving the original requested date when collection crosses midnight.
     _metadata(stage, requested_at, requested_at if generated_at is None else generated_at, execution_mode)
     quotes = [_collect_quote(provider, code) for code in PUBLIC_SYMBOLS]
-    result = _metadata(stage, requested_at, _now() if generated_at is None else generated_at, execution_mode)
+    raw_global = (_fetch_global_observations(global_provider, treasury_fallback)
+                  if stage == 'morning' else None)
+    completed_at = _now() if generated_at is None else generated_at
+    result = _metadata(stage, requested_at, completed_at, execution_mode)
     result['market'] = _market(quotes)
+    if raw_global is None:
+        records = [_global_failure(symbol, 'NOT_COLLECTED_FOR_STAGE')
+                   for symbol in GLOBAL_SYMBOLS]
+    else:
+        records = [(_global_failure(symbol, error) if error is not None
+                    else _observation_record(
+                        symbol, observation, _local_time(completed_at),
+                        expected_source=expected_source))
+                   for symbol, observation, error, expected_source in raw_global]
+    result['global_market'] = _global_market(records, stage=stage)
     validate_snapshot(result)
     return result
 
@@ -179,33 +339,86 @@ def _same(actual, expected):
     return actual == expected
 
 
+def _validate_domestic(payload, expected):
+    quotes = payload['market']['quotes']
+    if type(quotes) is not list or len(quotes) != len(PUBLIC_SYMBOLS):
+        _invalid()
+    checked = []
+    for code, quote in zip(PUBLIC_SYMBOLS, quotes):
+        if type(quote) is not dict:
+            _invalid()
+        error = quote['error_code']
+        if error is None:
+            if (not _finite_number(quote['price'], positive=True)
+                    or not _finite_number(quote['change_pct'])):
+                _invalid()
+            checked.append(_quote_record(code, quote['price'], quote['change_pct']))
+        elif type(error) is str and error in _ERRORS:
+            checked.append(_quote_record(code, error=error))
+        else:
+            _invalid()
+    expected['market'] = _market(checked)
+
+
+def _validate_global(payload, expected):
+    market = payload['global_market']
+    if type(market) is not dict or market.keys() != {'status', 'quotes'}:
+        _invalid()
+    records = market['quotes']
+    if type(records) is not list or len(records) != len(GLOBAL_SYMBOLS):
+        _invalid()
+    checked = []
+    generated_at = _parse_time(payload['generated_at'])
+    stage = payload['stage']
+    for symbol, record in zip(GLOBAL_SYMBOLS, records):
+        if type(record) is not dict or tuple(record) != _GLOBAL_FIELDS:
+            _invalid()
+        if record['symbol'] != symbol:
+            _invalid()
+        if stage != 'morning':
+            rebuilt = _global_failure(symbol, 'NOT_COLLECTED_FOR_STAGE')
+            if not _same(record, rebuilt):
+                _invalid()
+            checked.append(rebuilt)
+            continue
+        error = record['error_code']
+        if error is None:
+            observation = SourceObservation(
+                symbol=record['symbol'], value=record['value'],
+                previous_value=record['previous_value'],
+                source_as_of=record['source_as_of'], session_date=record['session_date'],
+                source=record['source'],
+            )
+            rebuilt = _observation_record(symbol, observation, generated_at)
+            if rebuilt['error_code'] is not None or not _same(record, rebuilt):
+                _invalid()
+        elif (type(error) is str and error in _GLOBAL_ERRORS
+              and error != 'NOT_COLLECTED_FOR_STAGE'):
+            rebuilt = _global_failure(symbol, error)
+            if not _same(record, rebuilt):
+                _invalid()
+        else:
+            _invalid()
+        checked.append(rebuilt)
+    expected['global_market'] = _global_market(checked, stage=stage)
+
+
 def validate_snapshot(payload):
-    """Strict allowlist: no account fields, arbitrary strings or extra keys."""
+    """Strict allowlist for exact legacy v1 and current v2 snapshots."""
     try:
         if type(payload) is not dict:
+            _invalid()
+        schema_version = payload['schema_version']
+        if schema_version not in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
             _invalid()
         expected = _metadata(
             payload['stage'], _parse_time(payload['requested_at']),
             _parse_time(payload['generated_at']), payload['execution_mode'],
+            schema_version=schema_version,
         )
-        quotes = payload['market']['quotes']
-        if type(quotes) is not list or len(quotes) != len(PUBLIC_SYMBOLS):
-            _invalid()
-        checked = []
-        for code, quote in zip(PUBLIC_SYMBOLS, quotes):
-            if type(quote) is not dict:
-                _invalid()
-            error = quote['error_code']
-            if error is None:
-                if (not _finite_number(quote['price'], positive=True)
-                        or not _finite_number(quote['change_pct'])):
-                    _invalid()
-                checked.append(_quote_record(code, quote['price'], quote['change_pct']))
-            elif type(error) is str and error in _ERRORS:
-                checked.append(_quote_record(code, error=error))
-            else:
-                _invalid()
-        expected['market'] = _market(checked)
+        _validate_domestic(payload, expected)
+        if schema_version == SCHEMA_VERSION:
+            _validate_global(payload, expected)
         if not _same(payload, expected):
             _invalid()
     except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
@@ -349,6 +562,8 @@ def write_reports(snapshots, output_dir):
         _invalid()
     for payload in snapshots:
         validate_snapshot(payload)
+        if payload['schema_version'] != SCHEMA_VERSION:
+            _invalid()
     if len({payload['stage'] for payload in snapshots}) != len(snapshots):
         _invalid()
     directory = _check_directory(output_dir)
