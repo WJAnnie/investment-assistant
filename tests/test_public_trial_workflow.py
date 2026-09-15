@@ -61,10 +61,18 @@ class PublicTrialWorkflowTests(unittest.TestCase):
         self.assertEqual(set(options['sparse-checkout'].splitlines()), {
             '/.github/workflows/public-trial.yml', '/app/integration/__init__.py',
             '/app/integration/public_trial.py', '/app/market/sina.py', '/app/market/models.py',
-            '/app/notify/feishu.py', '/tests/test_public_trial.py',
+            '/app/market/global_markets.py', '/app/notify/feishu.py',
+            '/tests/test_global_markets.py', '/tests/test_public_trial.py',
             '/tests/test_public_trial_delivery.py', '/tests/test_public_trial_workflow.py',
             '/tests/test_feishu.py',
         })
+
+    def test_cloud_regression_runs_all_four_required_suites(self):
+        script = self.steps['tests']['run']
+        for filename in ('test_public_trial.py', 'test_public_trial_delivery.py',
+                         'test_public_trial_workflow.py', 'test_global_markets.py'):
+            self.assertIn(filename, script)
+        self.assertIn('compileall -q app tests', script)
 
     def test_actions_are_pinned_and_no_artifact_or_cache_is_uploaded(self):
         for step in self.job['steps']:

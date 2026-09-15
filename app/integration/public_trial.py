@@ -19,9 +19,11 @@ import requests
 from app.market.sina import SinaProvider
 from app.market.global_markets import (
     ERROR_CODES as GLOBAL_PROVIDER_ERRORS,
+    FredTreasuryProvider,
     GlobalMarketDataError,
     INSTRUMENTS,
     SourceObservation,
+    YahooGlobalMarketProvider,
 )
 
 
@@ -60,11 +62,51 @@ _MARKET_LABELS = {
     'partial': '部分公开行情暂不可用',
     'unavailable': '公开行情暂不可用',
 }
-_QUOTE_ERROR_LABELS = {
-    'NO_QUOTE': '暂无行情',
-    'PROVIDER_UNAVAILABLE': '行情源暂不可用',
-    'INVALID_QUOTE': '行情数据未通过校验',
+_QUOTE_ERROR_LABELS = {code: '暂不可用' for code in _ERRORS}
+_GLOBAL_FRESHNESS_LABELS = {
+    'RECENT': '数据较新',
+    'DELAYED_OR_HOLIDAY': '可能因延迟或休市未更新',
+    'STALE': '数据已陈旧，请谨慎核对',
 }
+_GLOBAL_STATUS_LABELS = {
+    'complete': '完整性：8项全球行情均已获取。',
+    'partial': '完整性：部分全球行情暂不可用，其余项目照常展示。',
+    'unavailable': '完整性：全球行情暂不可用。',
+}
+
+
+def _global_value(record):
+    if record['symbol'] == '^TNX':
+        return f"{record['value']:.2f}%"
+    units = {'GC=F': ' 美元/盎司', 'CL=F': ' 美元/桶'}
+    return f"{record['value']:,.2f}{units.get(record['symbol'], ' 点')}"
+
+
+def _global_change(record):
+    return (f"{record['change']:+.1f} bp" if record['symbol'] == '^TNX'
+            else f"{record['change']:+.2f}%")
+
+
+def _global_time(record):
+    if record['source'] == 'fred_dgs10':
+        return f"数据日 {record['session_date'][5:]}"
+    observed = _strict_source_time(record['source_as_of']).astimezone(SHANGHAI)
+    return f'截至 {observed:%m-%d %H:%M}'
+
+
+def _render_global_market(payload):
+    if payload['schema_version'] == LEGACY_SCHEMA_VERSION:
+        return ['隔夜全球市场尚未接入，不判断强弱。']
+    market = payload['global_market']
+    lines = ['🌍 隔夜全球市场', _GLOBAL_STATUS_LABELS[market['status']]]
+    for record in market['quotes']:
+        if record['error_code'] is not None:
+            lines.append(f"- {record['name']}：暂不可用")
+        else:
+            lines.append(f"- {record['name']}：{_global_value(record)}；较前值 "
+                         f"{_global_change(record)}；{_global_time(record)}；"
+                         f"{_GLOBAL_FRESHNESS_LABELS[record['freshness']]}")
+    return lines
 
 
 def _invalid():
@@ -439,13 +481,12 @@ def render_report(payload):
     lines = [
         f"🔔 {STAGES[stage]} {_TITLES[stage]}", '',
         f"北京时间：{report_time}",
-        f"数据状态：{_MARKET_LABELS[payload['market']['status']]}",
+        f"国内指数状态：{_MARKET_LABELS[payload['market']['status']]}",
         f"本次模式：{timing}", '',
     ]
     if stage == 'morning':
-        lines += [
-            '隔夜全球市场：美股/纳斯达克/半导体/美债/美元/黄金/原油尚未接入，不判断强弱。',
-            '市场趋势与风险：证据不足，暂不判断；行业排序与评分尚未接入。',
+        lines += _render_global_market(payload) + [
+            '', '市场趋势与风险：不依据这些观测推断强弱；行业排序与评分尚未接入。',
             '以下只是公共国内指数观测，不代表你的持仓：', '',
         ]
         for quote in payload['market']['quotes']:
@@ -476,7 +517,7 @@ def render_report(payload):
         '如需交易，必须由你核对真实账户后人工确认。',
         '', '【风险说明】',
         '本消息只使用公开行情并采用合成账户演练，属于非交易信号，不构成投资建议，也不计入五日真实账户验收。',
-        '行情源未提供可靠时间戳，当前数据新鲜度待核验；工作日调度也不等于交易日历。',
+        '国内指数行情源未提供可靠时间戳，其新鲜度待核验；工作日调度也不等于交易日历。',
     ]
     return '\n'.join(lines)
 
@@ -648,8 +689,12 @@ def main(argv=None):
             requested_at = _now()
             with _IsolatedSession() as session:
                 provider = SinaProvider(session=session)
-                snapshots = [build_snapshot(stage, provider=provider, requested_at=requested_at,
-                                            execution_mode=args.mode)
+                global_provider = YahooGlobalMarketProvider(session=session)
+                treasury_fallback = FredTreasuryProvider(session=session)
+                snapshots = [build_snapshot(
+                    stage, provider=provider, global_provider=global_provider,
+                    treasury_fallback=treasury_fallback, requested_at=requested_at,
+                    execution_mode=args.mode)
                              for stage in (STAGES if args.stage == 'all' else [args.stage])]
             write_reports(snapshots, args.output)
             for payload in snapshots:

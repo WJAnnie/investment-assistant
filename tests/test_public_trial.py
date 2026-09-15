@@ -746,7 +746,7 @@ class ValidationTests(unittest.TestCase):
 
         self.assertIn("北京时间：2026年9月14日 09:01", rendered)
         self.assertIn("本次模式：手动演练", rendered)
-        self.assertIn("数据状态：公开行情已获取，来源时间待核验", rendered)
+        self.assertIn("国内指数状态：公开行情已获取，来源时间待核验", rendered)
         self.assertIn("【当前建议】", rendered)
         self.assertIn("WAIT｜暂不操作", rendered)
         self.assertIn("【风险说明】", rendered)
@@ -761,6 +761,56 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("本次模式：定时演练（延迟完成）", rendered)
         self.assertNotIn("scheduled", rendered)
         self.assertNotIn("late", rendered)
+
+
+    def test_v2_morning_renders_eight_human_readable_global_observations(self):
+        yahoo = FakeGlobalProvider({
+            "^GSPC": SourceObservation("^GSPC", 5432.1, 5400.0,
+                "2026-09-14T00:00:00+00:00", "2026-09-13", "yahoo_chart"),
+            "^TNX": lambda _symbol: (_ for _ in ()).throw(RuntimeError(SECRET)),
+            "GC=F": SourceObservation("GC=F", 2612.3, 2600.0,
+                "2026-09-14T00:00:00+00:00", "2026-09-13", "yahoo_chart"),
+            "CL=F": SourceObservation("CL=F", 68.25, 67.5,
+                "2026-09-14T00:00:00+00:00", "2026-09-13", "yahoo_chart"),
+        })
+        fred = FakeGlobalProvider({
+            "^TNX": SourceObservation("^TNX", 4.61, 4.60, None,
+                                      "2026-09-13", "fred_dgs10"),
+        })
+        rendered = trial.render_report(build(global_provider=yahoo, treasury_fallback=fred))
+        self.assertIn("🌍 隔夜全球市场", rendered)
+        self.assertIn("标普500：5,432.10 点；较前值 +0.59%；截至 09-14 08:00；数据较新", rendered)
+        self.assertIn("美国10年期国债收益率：4.61%；较前值 +1.0 bp；数据日 09-13", rendered)
+        self.assertIn("COMEX黄金：2,612.30 美元/盎司", rendered)
+        self.assertIn("WTI原油：68.25 美元/桶", rendered)
+        for entry in INSTRUMENTS.values():
+            self.assertEqual(rendered.count(f"- {entry.name}："), 1)
+        for forbidden in ("yahoo_chart", "fred_dgs10", "RECENT", "STALE",
+                          "DELAYED_OR_HOLIDAY", "error_code", "manual_replay",
+                          "available_unverified", "ADD", "BUY"):
+            self.assertNotIn(forbidden, rendered)
+        self.assertIn("WAIT｜暂不操作", rendered)
+        self.assertIn("人工确认", rendered)
+        self.assertIn("国内指数行情源未提供可靠时间戳", rendered)
+        self.assertNotIn("\n行情源未提供可靠时间戳", rendered)
+
+    def test_global_partial_and_unavailable_are_readable_and_redacted(self):
+        partial = build(global_provider=FakeGlobalProvider({
+            "^SOX": lambda _symbol: (_ for _ in ()).throw(RuntimeError(SECRET)),
+        }))
+        text = trial.render_report(partial)
+        self.assertIn("完整性：部分全球行情暂不可用，其余项目照常展示。", text)
+        self.assertIn("- 费城半导体指数：暂不可用", text)
+        self.assertNotIn("PROVIDER_UNAVAILABLE", text)
+        unavailable = trial.render_report(build(
+            global_provider=FailingGlobalProvider(), treasury_fallback=FailingGlobalProvider()))
+        self.assertIn("完整性：全球行情暂不可用。", unavailable)
+        self.assertEqual(unavailable.count("：暂不可用"), len(INSTRUMENTS))
+
+    def test_legacy_v1_morning_still_says_global_market_is_not_connected(self):
+        rendered = trial.render_report(legacy())
+        self.assertIn("隔夜全球市场尚未接入", rendered)
+        self.assertNotIn("🌍 隔夜全球市场", rendered)
 
 
 class WriteTests(unittest.TestCase):

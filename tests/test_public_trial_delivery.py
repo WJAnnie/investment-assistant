@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from app.integration import public_trial
+from app.market.global_markets import INSTRUMENTS, SourceObservation
 from app.market.models import Quote
 
 
@@ -92,6 +93,94 @@ class PublicTrialDeliveryTests(unittest.TestCase):
                 self.assertEqual(payload['execution_mode'], 'manual_replay')
                 self.assertNotIn('SECRET_', path.read_text(encoding='utf-8'))
             self.assertEqual(public_trial.main(['validate', '--input', str(output)]), 0)
+
+
+    def test_cli_collect_wires_three_providers_to_one_isolated_session(self):
+        sessions = []
+        domestic_instances, yahoo_instances, fred_instances = [], [], []
+
+        class Session:
+            def __init__(self):
+                sessions.append(self)
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return None
+
+        class Domestic:
+            def __init__(self, session):
+                self.session = session
+                self.calls = []
+                domestic_instances.append(self)
+            def fetch(self, code):
+                self.calls.append(code)
+                return Quote(code, 'fixed', 100.0, 1.0, 'fixed')
+
+        class Yahoo:
+            def __init__(self, session):
+                self.session = session
+                self.calls = []
+                yahoo_instances.append(self)
+            def fetch(self, symbol):
+                self.calls.append(symbol)
+                return SourceObservation(symbol, 4.61 if symbol == '^TNX' else 102.0,
+                    4.60 if symbol == '^TNX' else 100.0,
+                    '2026-09-14T00:00:00+00:00', '2026-09-13', 'yahoo_chart')
+
+        class Fred:
+            def __init__(self, session):
+                self.session = session
+                self.calls = []
+                fred_instances.append(self)
+            def fetch(self, symbol):
+                self.calls.append(symbol)
+                raise AssertionError('fallback should not run')
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(public_trial, '_IsolatedSession', Session), \
+                patch.object(public_trial, 'SinaProvider', Domestic), \
+                patch.object(public_trial, 'YahooGlobalMarketProvider', Yahoo), \
+                patch.object(public_trial, 'FredTreasuryProvider', Fred), \
+                patch.object(public_trial, '_now', return_value=datetime(
+                    2026, 9, 14, 1, 0, tzinfo=timezone.utc)):
+            self.assertEqual(public_trial.main([
+                'collect', '--stage', 'morning', '--output', directory]), 0)
+        self.assertEqual(len(sessions), 1)
+        self.assertIs(domestic_instances[0].session, sessions[0])
+        self.assertIs(yahoo_instances[0].session, sessions[0])
+        self.assertIs(fred_instances[0].session, sessions[0])
+        self.assertEqual(yahoo_instances[0].calls, list(INSTRUMENTS))
+        self.assertEqual(fred_instances[0].calls, [])
+
+    def test_cli_non_morning_makes_zero_global_fetches(self):
+        class Domestic:
+            def __init__(self, **_kwargs): pass
+            def fetch(self, code): return Quote(code, 'fixed', 100.0, 1.0, 'fixed')
+        class Global:
+            instances = []
+            def __init__(self, **_kwargs):
+                self.calls = []
+                self.instances.append(self)
+            def fetch(self, symbol):
+                self.calls.append(symbol)
+                raise AssertionError('non-morning global request')
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(public_trial, 'SinaProvider', Domestic), \
+                patch.object(public_trial, 'YahooGlobalMarketProvider', Global), \
+                patch.object(public_trial, 'FredTreasuryProvider', Global):
+            self.assertEqual(public_trial.main([
+                'collect', '--stage', 'midday', '--output', directory]), 0)
+        self.assertEqual([item.calls for item in Global.instances], [[], []])
+
+    def test_notification_bundle_contains_human_global_section_without_internals(self):
+        payload = self.snapshot()
+        content = public_trial._bundle([payload])
+        self.assertIn('🌍 隔夜全球市场', content)
+        self.assertEqual(sum(content.count(item.name) for item in INSTRUMENTS.values()),
+                         len(INSTRUMENTS))
+        for forbidden in ('yahoo_chart', 'fred_dgs10', 'RECENT', 'error_code'):
+            self.assertNotIn(forbidden, content)
+
 
     def test_invalid_batch_does_not_modify_existing_output(self):
         with tempfile.TemporaryDirectory() as directory:

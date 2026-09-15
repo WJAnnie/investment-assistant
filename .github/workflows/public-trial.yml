@@ -57,8 +57,10 @@ jobs:
             /app/integration/public_trial.py
             /app/market/sina.py
             /app/market/models.py
+            /app/market/global_markets.py
             /app/notify/feishu.py
             /tests/test_feishu.py
+            /tests/test_global_markets.py
             /tests/test_public_trial.py
             /tests/test_public_trial_delivery.py
             /tests/test_public_trial_workflow.py
@@ -75,7 +77,10 @@ jobs:
       - name: Offline boundary regression tests
         id: tests
         run: |
-          python -m unittest discover -s tests -p 'test_public_trial*.py'
+          python -m unittest discover -s tests -p 'test_public_trial.py'
+          python -m unittest discover -s tests -p 'test_public_trial_delivery.py'
+          python -m unittest discover -s tests -p 'test_public_trial_workflow.py'
+          python -m unittest discover -s tests -p 'test_global_markets.py'
           python -m unittest discover -s tests -p 'test_feishu.py'
           python -m compileall -q app tests
 
