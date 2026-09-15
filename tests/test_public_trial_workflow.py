@@ -177,6 +177,17 @@ class PublicTrialWorkflowTests(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             self.assertEqual(output.read_bytes(), before)
 
+    def test_publish_migrates_a_valid_previous_readme_before_final_validation(self):
+        script = self.steps['publish']['run']
+        checkout = script.index('checkout -B public-test-data FETCH_HEAD')
+        copy_snapshots = script.index('mkdir -p "${publish_dir}/latest"')
+        migrate = script.index(
+            'python -m app.integration.public_trial summary --input "${publish_dir}"',
+            checkout,
+        )
+
+        self.assertLess(migrate, copy_snapshots)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -143,8 +143,10 @@ jobs:
           if git -C "${publish_dir}" ls-remote --exit-code --heads origin refs/heads/public-test-data >/dev/null; then
             git -C "${publish_dir}" fetch --depth=1 origin refs/heads/public-test-data
             git -C "${publish_dir}" checkout -B public-test-data FETCH_HEAD
-            # Reject unsafe pre-existing files and symlinks BEFORE copying.
-            python -m app.integration.public_trial validate --input "${publish_dir}"
+            # Regenerate the presentation-only README from strictly validated
+            # snapshots so a renderer upgrade can migrate the data branch.
+            # Unknown files, links and invalid JSON still fail inside summary.
+            python -m app.integration.public_trial summary --input "${publish_dir}"
           else
             lookup_exit=$?
             if [[ "${lookup_exit}" != "2" ]]; then
