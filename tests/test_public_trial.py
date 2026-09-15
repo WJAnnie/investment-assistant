@@ -221,7 +221,7 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(quote["error_code"], "NO_QUOTE")
             self.assertIsNone(quote["price"])
             self.assertIsNone(quote["change_pct"])
-        self.assertIn("unavailable", trial.render_report(empty))
+        self.assertIn("公开行情暂不可用", trial.render_report(empty))
         if len(codes) > 1:
             partial = build("morning", provider=FakeProvider({codes[0]: None}), after=1)
             self.assertEqual(partial["market"]["status"], "partial")
@@ -473,6 +473,27 @@ class ValidationTests(unittest.TestCase):
         self.assertIsInstance(rendered, str)
         for label in LABELS:
             self.assertIn(label, rendered)
+
+    def test_rendered_report_humanizes_runtime_metadata_for_notifications(self):
+        rendered = trial.render_report(manual())
+
+        self.assertIn("北京时间：2026年9月14日 09:01", rendered)
+        self.assertIn("本次模式：手动演练", rendered)
+        self.assertIn("数据状态：公开行情已获取，来源时间待核验", rendered)
+        self.assertIn("【当前建议】", rendered)
+        self.assertIn("WAIT｜暂不操作", rendered)
+        self.assertIn("【风险说明】", rendered)
+        self.assertNotIn("#", rendered)
+        for internal_value in ("manual_replay", "available_unverified", "sina_public"):
+            with self.subTest(internal_value=internal_value):
+                self.assertNotIn(internal_value, rendered)
+
+    def test_rendered_report_humanizes_scheduled_timing_status(self):
+        rendered = trial.render_report(build("morning", minutes=20, after=1))
+
+        self.assertIn("本次模式：定时演练（延迟完成）", rendered)
+        self.assertNotIn("scheduled", rendered)
+        self.assertNotIn("late", rendered)
 
 
 class WriteTests(unittest.TestCase):

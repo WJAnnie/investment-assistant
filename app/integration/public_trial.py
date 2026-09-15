@@ -31,6 +31,23 @@ SCHEMA_VERSION = 'public-trial/v1'
 DATA_CLASSIFICATION = 'public_market_and_synthetic_test'
 _ERRORS = {'NO_QUOTE', 'PROVIDER_UNAVAILABLE', 'INVALID_QUOTE'}
 _TITLES = {'morning': '晨报', 'midday': '午盘变化', 'decision': '核心决策', 'closing': '收盘复盘'}
+_TIMING_LABELS = {
+    'manual_replay': '手动演练',
+    'on_time': '按计划完成',
+    'early': '提前执行',
+    'late': '延迟完成',
+    'non_weekday': '非工作日执行',
+}
+_MARKET_LABELS = {
+    'available_unverified': '公开行情已获取，来源时间待核验',
+    'partial': '部分公开行情暂不可用',
+    'unavailable': '公开行情暂不可用',
+}
+_QUOTE_ERROR_LABELS = {
+    'NO_QUOTE': '暂无行情',
+    'PROVIDER_UNAVAILABLE': '行情源暂不可用',
+    'INVALID_QUOTE': '行情数据未通过校验',
+}
 
 
 def _invalid():
@@ -198,26 +215,31 @@ def validate_snapshot(payload):
 def render_report(payload):
     validate_snapshot(payload)
     stage = payload['stage']
+    generated_at = _parse_time(payload['generated_at'])
+    report_time = (
+        f'{generated_at.year}年{generated_at.month}月{generated_at.day}日 '
+        f'{generated_at:%H:%M}'
+    )
+    timing = _TIMING_LABELS[payload['timing_status']]
+    if payload['execution_mode'] == 'scheduled':
+        timing = f'定时演练（{timing}）'
     lines = [
-        f"## {STAGES[stage]} {_TITLES[stage]}｜公开联调测试", '',
-        '合成账户 · 非交易信号 · 不计入五交易日真实账户验收',
-        f"场景时点：{payload['scheduled_for']}",
-        f"实际采集开始：{payload['requested_at']}",
-        f"报告完成：{payload['generated_at']}",
-        f"执行标记：{payload['execution_mode']} / {payload['timing_status']}",
-        f"公共行情：{payload['market']['status']}；来源时间未知（UNKNOWN），新鲜度未经验证。", '',
+        f"🔔 {STAGES[stage]} {_TITLES[stage]}", '',
+        f"北京时间：{report_time}",
+        f"数据状态：{_MARKET_LABELS[payload['market']['status']]}",
+        f"本次模式：{timing}", '',
     ]
     if stage == 'morning':
         lines += [
             '隔夜全球市场：美股/纳斯达克/半导体/美债/美元/黄金/原油尚未接入，不判断强弱。',
-            '市场趋势/风险：UNKNOWN；行业排序与评分：未接入。',
+            '市场趋势与风险：证据不足，暂不判断；行业排序与评分尚未接入。',
             '以下只是公共国内指数观测，不代表你的持仓：', '',
         ]
         for quote in payload['market']['quotes']:
             value = (f"{quote['price']:.4f}（{quote['change_pct']:+.2f}%）"
-                     if quote['error_code'] is None else f"不可用（{quote['error_code']}）")
+                     if quote['error_code'] is None else _QUOTE_ERROR_LABELS[quote['error_code']])
             lines.append(f"- {quote['name']}：{value}")
-        lines += ['', '合成持仓扫描：DEMO_A 10%、DEMO_B 5%、演示现金85%；不是实际账户。']
+        lines += ['', '持仓扫描：本次为合成演练，未读取你的真实账户。']
     elif stage == 'midday':
         lines += [
             '相对当天晨报：缺少可靠基线，暂无法比较；不把累计成本收益写成午盘变化。',
@@ -235,13 +257,19 @@ def render_report(payload):
             '事前判断 → 今日走势 → 对错评价：缺少配对记录，暂无法比较。',
             '模型调整：不做调整；不把一次合成演练当作模型学习或真实日验收。',
         ]
-    lines += ['', '动作：WAIT。只提醒；交易须由你人工确认并手动执行。',
-              '调度为工作日演练，不等于交易日历；GitHub 定时任务不保证准点。']
+    lines += [
+        '', '【当前建议】',
+        'WAIT｜暂不操作',
+        '如需交易，必须由你核对真实账户后人工确认。',
+        '', '【风险说明】',
+        '本消息只使用公开行情并采用合成账户演练，属于非交易信号，不构成投资建议，也不计入五日真实账户验收。',
+        '行情源未提供可靠时间戳，当前数据新鲜度待核验；工作日调度也不等于交易日历。',
+    ]
     return '\n'.join(lines)
 
 
 def _bundle(snapshots):
-    return '# 公开通知链路测试（非投资建议）\n\n' + '\n\n---\n\n'.join(
+    return '📊 投资辅助提醒\n\n' + '\n\n──────────\n\n'.join(
         render_report(snapshot) for snapshot in snapshots
     ) + '\n'
 
