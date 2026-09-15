@@ -1,15 +1,15 @@
 {
-  "schema_version": "public-trial/v1",
+  "schema_version": "public-trial/v2",
   "data_classification": "public_market_and_synthetic_test",
   "purpose": "delivery_test_not_investment_advice",
   "stage": "morning",
-  "execution_mode": "scheduled",
-  "requested_at": "2026-09-15T13:58:15.687658+08:00",
-  "generated_at": "2026-09-15T13:58:18.034841+08:00",
-  "scheduled_for": "2026-09-15T09:00:00+08:00",
-  "timing_status": "late",
+  "execution_mode": "manual_replay",
+  "requested_at": "2026-09-16T00:36:53.916000+08:00",
+  "generated_at": "2026-09-16T00:36:56.550285+08:00",
+  "scheduled_for": "2026-09-16T09:00:00+08:00",
+  "timing_status": "manual_replay",
   "coverage": {
-    "global_markets": "NOT_IMPLEMENTED",
+    "global_markets": "PUBLIC_OBSERVATIONS",
     "industry_ranking": "NOT_IMPLEMENTED",
     "morning_baseline": "MISSING",
     "multi_timeframe": "NOT_IMPLEMENTED",
@@ -45,8 +45,8 @@
       {
         "code": "SH.000001",
         "name": "上证指数",
-        "price": 3873.6946,
-        "change_pct": -0.3,
+        "price": 3864.2794,
+        "change_pct": -0.54,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -54,8 +54,8 @@
       {
         "code": "SZ.399001",
         "name": "深证成指",
-        "price": 13349.01,
-        "change_pct": -0.27,
+        "price": 13287.97,
+        "change_pct": -0.72,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -63,8 +63,8 @@
       {
         "code": "SZ.399006",
         "name": "创业板指",
-        "price": 3267.14,
-        "change_pct": -0.56,
+        "price": 3247.92,
+        "change_pct": -1.15,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -72,8 +72,8 @@
       {
         "code": "SH.000688",
         "name": "科创50",
-        "price": 1560.7204,
-        "change_pct": 2.12,
+        "price": 1551.9581,
+        "change_pct": 1.55,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -81,8 +81,8 @@
       {
         "code": "SH.000905",
         "name": "中证500",
-        "price": 7584.1536,
-        "change_pct": 0.17,
+        "price": 7561.5909,
+        "change_pct": -0.13,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -90,8 +90,8 @@
       {
         "code": "SH.000300",
         "name": "沪深300",
-        "price": 4465.8642,
-        "change_pct": -0.32,
+        "price": 4450.0402,
+        "change_pct": -0.67,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -99,8 +99,8 @@
       {
         "code": "SH.000016",
         "name": "上证50",
-        "price": 2852.3808,
-        "change_pct": -0.3,
+        "price": 2846.3073,
+        "change_pct": -0.52,
         "source_as_of": null,
         "freshness": "UNKNOWN",
         "error_code": null
@@ -108,10 +108,135 @@
       {
         "code": "SZ.399005",
         "name": "中小100",
-        "price": 8261.87,
-        "change_pct": 0.02,
+        "price": 8221.64,
+        "change_pct": -0.46,
         "source_as_of": null,
         "freshness": "UNKNOWN",
+        "error_code": null
+      }
+    ]
+  },
+  "global_market": {
+    "status": "complete",
+    "quotes": [
+      {
+        "category": "us_equities",
+        "symbol": "^GSPC",
+        "name": "标普500",
+        "value": 7587.97021484375,
+        "previous_value": 7619.97998046875,
+        "value_unit": "points",
+        "change": -0.4200767680105022,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-15T16:36:54+00:00",
+        "session_date": "2026-09-15",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "us_equities",
+        "symbol": "^DJI",
+        "name": "道琼斯工业指数",
+        "value": 52002.5703125,
+        "previous_value": 52421.19921875,
+        "value_unit": "points",
+        "change": -0.7985870458687705,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-15T16:36:55+00:00",
+        "session_date": "2026-09-15",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "nasdaq",
+        "symbol": "^IXIC",
+        "name": "纳斯达克综合指数",
+        "value": 26016.0703125,
+        "previous_value": 26186.41015625,
+        "value_unit": "points",
+        "change": -0.6504894818862517,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-15T16:36:54+00:00",
+        "session_date": "2026-09-15",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "semiconductors",
+        "symbol": "^SOX",
+        "name": "费城半导体指数",
+        "value": 11147.626953125,
+        "previous_value": 11131.2802734375,
+        "value_unit": "points",
+        "change": 0.14685354501859926,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-15T16:36:55+00:00",
+        "session_date": "2026-09-15",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "us_treasury",
+        "symbol": "^TNX",
+        "name": "美国10年期国债收益率",
+        "value": 5.001999855041504,
+        "previous_value": 4.960999965667725,
+        "value_unit": "percent",
+        "change": 4.09998893737793,
+        "change_unit": "bp",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-15T16:21:53+00:00",
+        "session_date": "2026-09-15",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "usd",
+        "symbol": "DX-Y.NYB",
+        "name": "美元指数",
+        "value": 99.63400268554688,
+        "previous_value": 99.45999908447266,
+        "value_unit": "points",
+        "change": 0.17494832362348056,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-15T16:26:54+00:00",
+        "session_date": "2026-09-15",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "gold",
+        "symbol": "GC=F",
+        "name": "COMEX黄金",
+        "value": 4337.0,
+        "previous_value": 4351.89990234375,
+        "value_unit": "usd_per_ounce",
+        "change": -0.342376954390089,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-15T16:26:53+00:00",
+        "session_date": "2026-09-15",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "oil",
+        "symbol": "CL=F",
+        "name": "WTI原油",
+        "value": 105.33999633789062,
+        "previous_value": 101.38999938964844,
+        "value_unit": "usd_per_barrel",
+        "change": 3.895844730269782,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-15T16:26:56+00:00",
+        "session_date": "2026-09-15",
+        "freshness": "RECENT",
         "error_code": null
       }
     ]
