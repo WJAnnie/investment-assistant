@@ -7,7 +7,7 @@ case asserts that no remote text, URL or header can leak into an error.
 
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from types import MappingProxyType, SimpleNamespace
 import unittest
@@ -842,6 +842,366 @@ class GlobalMarketProviderTests(unittest.TestCase):
         failure = self.assertFails(gm.ERROR_MALFORMED, raw)
         for value in (SECRET_REMOTE_TEXT, "query1.finance.yahoo.com", "https://", "?interval"):
             self.assertNotIn(value, repr(failure))
+
+
+def fred_payload(header="observation_date,DGS10", rows=None):
+    if rows is None:
+        rows = [("2026-09-10", "3.65"), ("2026-09-11", "3.66")]
+    lines = [header] + [f"{d},{v}" for d, v in rows]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+class FredTreasuryProviderTests(unittest.TestCase):
+    def setUp(self):
+        self.session = None
+
+    def provider(self, body=None, *, status_code=200, error=None, timeout=gm.TIMEOUT_SECONDS):
+        if body is None:
+            body = fred_payload()
+        self.session = FakeSession(body, status_code=status_code, error=error)
+        return gm.FredTreasuryProvider(session=self.session, timeout=timeout)
+
+    def observation(self, body=None, symbol=gm.FRED_SYMBOL, **kwargs):
+        return self.provider(body, **kwargs).fetch(symbol)
+
+    def assertFails(self, code, body=None, symbol=gm.FRED_SYMBOL, *, status_code=200, error=None):
+        provider = self.provider(body, status_code=status_code, error=error)
+        with self.assertRaises(gm.GlobalMarketDataError) as caught:
+            provider.fetch(symbol)
+        failure = caught.exception
+        self.assertEqual(failure.code, code)
+        self.assertIn(code, gm.ERROR_CODES)
+        self.assertEqual(str(failure), code)
+        self.assertIsNone(failure.__cause__)
+        self.assertIsNone(failure.__context__)
+        expected_calls = 0 if symbol != gm.FRED_SYMBOL else 1
+        self.assertEqual(len(self.session.calls), expected_calls)
+        return failure
+
+    def assertResponseFails(self, code, response):
+        session = StaticResponseSession(response)
+        provider = gm.FredTreasuryProvider(session=session)
+        with self.assertRaises(gm.GlobalMarketDataError) as caught:
+            provider.fetch(gm.FRED_SYMBOL)
+        failure = caught.exception
+        self.assertEqual(failure.code, code)
+        self.assertEqual(str(failure), code)
+        self.assertIsNone(failure.__cause__)
+        self.assertIsNone(failure.__context__)
+        self.assertNotIn(SECRET_REMOTE_TEXT, repr(failure))
+        self.assertEqual(len(session.calls), 1)
+        return failure
+
+    # ---- success path -----------------------------------------------------
+
+    def test_fred_returns_latest_and_previous_valid_daily_yield(self):
+        session = FakeSession(fred_payload("observation_date,DGS10",
+                                           [("2026-09-10", "3.65"), ("2026-09-11", "3.66")]))
+        quote = gm.FredTreasuryProvider(session=session).fetch("^TNX")
+        self.assertEqual(quote.symbol, "^TNX")
+        self.assertEqual(quote.value, 3.66)
+        self.assertEqual(quote.previous_value, 3.65)
+        self.assertEqual(quote.session_date, "2026-09-11")
+        self.assertIsNone(quote.source_as_of)
+        self.assertEqual(quote.source, "fred_dgs10")
+        self.assertEqual(session.calls[0]["timeout"], 10)
+
+    def test_fred_accepts_legacy_date_header(self):
+        quote = self.observation(fred_payload("DATE,DGS10",
+                                              [("2026-09-10", "3.65"), ("2026-09-11", "3.66")]))
+        self.assertEqual(quote.value, 3.66)
+        self.assertEqual(quote.previous_value, 3.65)
+        self.assertEqual(quote.session_date, "2026-09-11")
+        self.assertIsNone(quote.source_as_of)
+
+    def test_fred_accepts_utf8_bom(self):
+        for header in ("observation_date,DGS10", "DATE,DGS10"):
+            with self.subTest(header=header):
+                body = b"\xef\xbb\xbf" + fred_payload(header)
+                quote = self.observation(body)
+                self.assertEqual(quote.value, 3.66)
+                self.assertEqual(quote.previous_value, 3.65)
+
+    def test_fred_request_uses_fixed_url_params_headers_timeout_stream_no_redirect(self):
+        quote = self.observation()
+        (call,) = self.session.calls
+        self.assertEqual(call["url"], "https://fred.stlouisfed.org/graph/fredgraph.csv")
+        self.assertNotIn("?", call["url"])
+        self.assertEqual(call["params"], {"id": "DGS10"})
+        self.assertEqual(call["timeout"], 10)
+        self.assertIs(call["allow_redirects"], False)
+        self.assertIs(call["stream"], True)
+        self.assertEqual(quote.source, "fred_dgs10")
+        self.assertEqual(call["headers"], {
+            "Accept": "text/csv",
+            "User-Agent": "investment-assistant-public-trial/1.0",
+        })
+        for name, value in call["headers"].items():
+            self.assertNotIn(SECRET_HEADER_VALUE, f"{name}:{value}")
+            self.assertNotIn(name.lower(), {"authorization", "cookie", "proxy-authorization"})
+
+    def test_fred_timeout_is_finite_positive_number_capped_at_ten_seconds(self):
+        messages = set()
+        for invalid in (None, False, True, 0, 0.0, -1, "1", float("nan"),
+                        float("inf"), float("-inf"), 10.0001):
+            with self.subTest(invalid=invalid):
+                session = FakeSession(fred_payload())
+                with self.assertRaises(ValueError) as caught:
+                    gm.FredTreasuryProvider(session=session, timeout=invalid)
+                messages.add(str(caught.exception))
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertIsNone(caught.exception.__context__)
+                self.assertEqual(session.calls, [])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(next(iter(messages)),
+                         "timeout must be a finite number greater than 0 and at most 10 seconds")
+
+        session = FakeSession(fred_payload())
+        gm.FredTreasuryProvider(session=session, timeout=0.25).fetch(gm.FRED_SYMBOL)
+        self.assertEqual(session.calls[0]["timeout"], 0.25)
+
+    def test_fred_rejects_unsupported_symbols_before_any_request(self):
+        provider = self.provider()
+        for symbol in ("^GSPC", "^DJI", "^IXIC", "^SOX", "DX-Y.NYB", "GC=F", "CL=F",
+                       "AAPL", "DGS10", "", None, 5, ["^TNX"], "^tnx"):
+            with self.subTest(symbol=symbol), self.assertRaises(gm.GlobalMarketDataError) as caught:
+                provider.fetch(symbol)
+            self.assertEqual(caught.exception.code, gm.ERROR_UNSUPPORTED_SYMBOL)
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertIsNone(caught.exception.__context__)
+        self.assertEqual(self.session.calls, [])
+
+    def test_fred_skips_missing_markers_and_empty_strings(self):
+        rows = [
+            ("2026-09-08", "3.60"),
+            ("2026-09-09", "."),
+            ("2026-09-10", ""),
+            ("2026-09-11", "3.66"),
+        ]
+        quote = self.observation(fred_payload(rows=rows))
+        self.assertEqual(quote.previous_value, 3.60)
+        self.assertEqual(quote.value, 3.66)
+        self.assertEqual(quote.session_date, "2026-09-11")
+
+    # ---- failure boundaries -----------------------------------------------
+
+    def test_fred_rejects_malformed_headers(self):
+        for header in ("observation_date,DGS10,EXTRA",
+                       "observation_date,observation_date",
+                       "DGS10,DGS10",
+                       "DATE,DATE",
+                       "observation_date",
+                       "DGS10",
+                       "DGS10,observation_date",
+                       "DGS10,DATE",
+                       "observation_Date,DGS10",
+                       "date,dgs10",
+                       "DATE,dgs10",
+                       "observation_date,VALUE",
+                       "DATE,CLOSE"):
+            with self.subTest(header=header):
+                self.assertFails(gm.ERROR_MALFORMED, fred_payload(header=header))
+        self.assertFails(gm.ERROR_MALFORMED, b"")
+        self.assertFails(gm.ERROR_MALFORMED, b"\n")
+
+    def test_fred_rejects_malformed_csv_and_nul(self):
+        self.assertFails(gm.ERROR_MALFORMED,
+                         b"observation_date,DGS10\n2026-09-10,3.65\x00\n2026-09-11,3.66\n")
+        self.assertFails(gm.ERROR_MALFORMED,
+                         b"observation_date\x00,DGS10\n2026-09-10,3.65\n2026-09-11,3.66\n")
+        self.assertFails(gm.ERROR_MALFORMED,
+                         b'observation_date,DGS10\n"2026-09-10,3.65\n2026-09-11,3.66\n')
+        self.assertFails(gm.ERROR_MALFORMED,
+                         b"observation_date,DGS10\n2026-09-10,3.65,EXTRA\n2026-09-11,3.66\n")
+        self.assertFails(gm.ERROR_MALFORMED,
+                         b"observation_date,DGS10\n2026-09-10\n2026-09-11,3.66\n")
+        self.assertFails(gm.ERROR_MALFORMED,
+                         b"observation_date,DGS10\n\n2026-09-10,3.65\n2026-09-11,3.66\n")
+        self.assertFails(gm.ERROR_MALFORMED, b"\xff\xfe\x00\x01")
+        with self.assertRaises(gm.GlobalMarketDataError) as caught:
+            gm._strict_fred_pairs("observation_date,DGS10\n2026-09-10,3.65\n2026-09-11,3.66\n")
+        self.assertEqual(caught.exception.code, gm.ERROR_MALFORMED)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+
+    def test_fred_rejects_insufficient_history(self):
+        self.assertFails(gm.ERROR_INSUFFICIENT, b"observation_date,DGS10\n")
+        self.assertFails(gm.ERROR_INSUFFICIENT,
+                         fred_payload(rows=[("2026-09-10", "3.65")]))
+        self.assertFails(gm.ERROR_INSUFFICIENT,
+                         fred_payload(rows=[("2026-09-10", "."), ("2026-09-11", "3.66")]))
+        self.assertFails(gm.ERROR_INSUFFICIENT,
+                         fred_payload(rows=[("2026-09-10", "."), ("2026-09-11", "")]))
+
+    def test_fred_rejects_invalid_date_formats_and_ordering(self):
+        for bad_date in ("2026/09/10", "2026-9-10", "2026-09-1", "20260910",
+                         "bad-date", "2026-09-10T00:00:00", "2026-02-30",
+                         "2026-13-01", "2026-00-10", "2026-04-31"):
+            with self.subTest(bad_date=bad_date):
+                self.assertFails(
+                    gm.ERROR_INVALID_TIME,
+                    fred_payload(rows=[("2026-09-09", "3.60"), (bad_date, "3.65")]),
+                )
+
+        # Duplicate dates
+        self.assertFails(
+            gm.ERROR_INVALID_TIME,
+            fred_payload(rows=[("2026-09-10", "3.65"), ("2026-09-10", "3.66")]),
+        )
+        # Decreasing dates
+        self.assertFails(
+            gm.ERROR_INVALID_TIME,
+            fred_payload(rows=[("2026-09-11", "3.65"), ("2026-09-10", "3.66")]),
+        )
+        # Skipped row with duplicate date
+        self.assertFails(
+            gm.ERROR_INVALID_TIME,
+            fred_payload(rows=[("2026-09-10", "3.65"), ("2026-09-10", ".")]),
+        )
+        # Skipped row with decreasing date
+        self.assertFails(
+            gm.ERROR_INVALID_TIME,
+            fred_payload(rows=[("2026-09-11", "3.65"), ("2026-09-10", "."), ("2026-09-12", "3.66")]),
+        )
+
+    def test_fred_rejects_invalid_values(self):
+        for bad_value in ("NaN", "nan", "Infinity", "-Infinity", "inf", "-inf",
+                          "0", "0.0", "-1.5", "abc", "3.6.5", " 3.65", "3.65 ", "3_65"):
+            with self.subTest(bad_value=bad_value):
+                self.assertFails(
+                    gm.ERROR_INVALID_VALUE,
+                    fred_payload(rows=[("2026-09-10", "3.65"), ("2026-09-11", bad_value)]),
+                )
+
+        # Bad value in previous observation position
+        self.assertFails(
+            gm.ERROR_INVALID_VALUE,
+            fred_payload(rows=[("2026-09-10", "bad"), ("2026-09-11", "3.66")]),
+        )
+
+    def test_fred_accepts_full_production_history_without_row_cap(self):
+        # FRED's DGS10 endpoint returns the complete history (~16,000 daily rows since 1962).
+        base_day = date(1962, 1, 2)
+        dates = [base_day + timedelta(days=i) for i in range(16000)]
+        rows = [(d.isoformat(), f"{3.0 + (i % 500) * 0.01:.2f}") for i, d in enumerate(dates)]
+        body = fred_payload(rows=rows)
+        quote = self.observation(body)
+        self.assertEqual(quote.session_date, dates[-1].isoformat())
+        self.assertAlmostEqual(quote.value, float(rows[-1][1]))
+        self.assertAlmostEqual(quote.previous_value, float(rows[-2][1]))
+
+    def test_fred_body_cap_enforcement(self):
+        base_day = date(1900, 1, 1)
+        header = b"observation_date,DGS10\n"
+        rem = gm.MAX_BODY_BYTES - len(header)
+        n_rows = rem // 16
+        leftover = rem % 16
+        pad_val = "0" * leftover + "3.50"
+        rows = []
+        for i in range(n_rows - 1):
+            d = base_day + timedelta(days=i)
+            rows.append(f"{d.isoformat()},3.50\n".encode("utf-8"))
+        last_d = base_day + timedelta(days=n_rows - 1)
+        rows.append(f"{last_d.isoformat()},{pad_val}\n".encode("utf-8"))
+        body = header + b"".join(rows)
+        self.assertEqual(len(body), gm.MAX_BODY_BYTES)
+        quote = self.observation(body)
+        self.assertEqual(quote.value, 3.5)
+
+        oversized = body + b" "
+        self.assertEqual(len(oversized), gm.MAX_BODY_BYTES + 1)
+        self.assertFails(gm.ERROR_TOO_LARGE, oversized)
+
+    def test_fred_transport_failures_become_fixed_error_code(self):
+        for error in (requests.Timeout("SECRET"), requests.ConnectionError("SECRET"),
+                      requests.RequestException("SECRET"), RuntimeError(SECRET_REMOTE_TEXT)):
+            with self.subTest(error=type(error).__name__):
+                failure = self.assertFails(gm.ERROR_NETWORK, fred_payload(), error=error)
+                self.assertNotIn(SECRET_REMOTE_TEXT, repr(failure))
+
+    def test_fred_response_protocol_access_failures_are_fixed_and_context_free(self):
+        for phase in ("status_property", "iter_property", "iter_call", "iter_iteration",
+                      "status_memory", "iter_memory", "iter_iteration_memory"):
+            with self.subTest(phase=phase):
+                self.assertResponseFails(
+                    gm.ERROR_NETWORK,
+                    BoundaryResponse(body=fred_payload(), phase=phase),
+                )
+
+    def test_fred_response_stream_rejects_every_non_byte_chunk_type(self):
+        for chunk in (None, "bytes", memoryview(b"bytes"), 1, 1.0, True, object()):
+            with self.subTest(chunk_type=type(chunk).__name__):
+                self.assertResponseFails(
+                    gm.ERROR_MALFORMED,
+                    BoundaryResponse(body=fred_payload(), chunks=(chunk,)),
+                )
+
+    def test_fred_close_failures_never_replace_success_or_primary_failure(self):
+        for close_phase in ("property", "call"):
+            with self.subTest(close_phase=close_phase, outcome="success"):
+                session = StaticResponseSession(
+                    BoundaryResponse(body=fred_payload(), close_phase=close_phase))
+                quote = gm.FredTreasuryProvider(session=session).fetch(gm.FRED_SYMBOL)
+                self.assertEqual(quote.value, 3.66)
+
+            with self.subTest(close_phase=close_phase, outcome="failure"):
+                self.assertResponseFails(
+                    gm.ERROR_HTTP_STATUS,
+                    BoundaryResponse(body=fred_payload(), status=500, close_phase=close_phase),
+                )
+
+    def test_fred_rejects_redirects_rate_limits_and_other_statuses(self):
+        for status_code, code in ((301, gm.ERROR_REDIRECT), (302, gm.ERROR_REDIRECT),
+                                  (307, gm.ERROR_REDIRECT), (429, gm.ERROR_RATE_LIMITED),
+                                  (400, gm.ERROR_HTTP_STATUS), (404, gm.ERROR_HTTP_STATUS),
+                                  (500, gm.ERROR_HTTP_STATUS), (503, gm.ERROR_HTTP_STATUS),
+                                  (201, gm.ERROR_HTTP_STATUS), (204, gm.ERROR_HTTP_STATUS)):
+            with self.subTest(status_code=status_code):
+                self.assertFails(code, fred_payload(), status_code=status_code)
+
+    def test_fred_default_session_disables_proxy_credentials_and_redirects(self):
+        provider = gm.FredTreasuryProvider()
+        self.assertIs(provider.session.trust_env, False)
+        response = SimpleNamespace(status_code=302)
+        with patch.object(requests.Session, "request", return_value=response) as request:
+            with self.assertRaises(gm.GlobalMarketDataError) as caught:
+                provider.fetch("^TNX")
+        self.assertEqual(caught.exception.code, gm.ERROR_REDIRECT)
+        self.assertIs(request.call_args.kwargs["allow_redirects"], False)
+
+    def test_fred_injected_session_is_a_trusted_test_seam_with_environment_disabled(self):
+        session = FakeSession(fred_payload())
+        provider = gm.FredTreasuryProvider(session=session)
+        self.assertIs(provider.session, session)
+        self.assertIs(session.trust_env, False)
+
+    def test_fred_rejects_session_that_cannot_disable_environment_credentials(self):
+        class LockedSession:
+            @property
+            def trust_env(self):
+                return True
+
+            @trust_env.setter
+            def trust_env(self, _value):
+                raise RuntimeError(SECRET_REMOTE_TEXT)
+
+        with self.assertRaises(ValueError) as caught:
+            gm.FredTreasuryProvider(session=LockedSession())
+        self.assertEqual(str(caught.exception),
+                         "session must allow trust_env to be disabled")
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertNotIn(SECRET_REMOTE_TEXT, repr(caught.exception))
+
+    def test_fred_failures_never_embed_remote_text_url_or_headers(self):
+        for code, body in ((gm.ERROR_MALFORMED, b"observation_date,DGS10\n" + SECRET_REMOTE_TEXT.encode("utf-8")),
+                           (gm.ERROR_INVALID_VALUE, fred_payload(rows=[("2026-09-10", "3.65"), ("2026-09-11", SECRET_REMOTE_TEXT)])),
+                           (gm.ERROR_INVALID_TIME, fred_payload(rows=[("2026-09-10", "3.65"), (SECRET_REMOTE_TEXT, "3.66")]))):
+            with self.subTest(code=code):
+                failure = self.assertFails(code, body)
+                self.assertNotIn(SECRET_REMOTE_TEXT, repr(failure))
+                for value in ("fred.stlouisfed.org", "https://", "?id=DGS10"):
+                    self.assertNotIn(value, repr(failure))
 
 
 if __name__ == "__main__":

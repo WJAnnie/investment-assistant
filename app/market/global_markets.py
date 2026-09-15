@@ -3,7 +3,9 @@
 This adapter only *reports* what a public endpoint said. It performs no retry,
 keeps no cache, derives no trading action and never labels its output verified,
 realtime or official: the Yahoo Chart endpoint behind it is unauthenticated and
-may rate limit or change shape without notice.
+may rate limit or change shape without notice. The Treasury instrument
+additionally has a narrow, date-only FRED ``DGS10`` fallback that never pretends
+to know an intraday time.
 
 Trust boundaries enforced here:
 
@@ -22,11 +24,14 @@ Trust boundaries enforced here:
   raw response.
 """
 
+import csv
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import lru_cache
+import io
 import json
 import math
+import re as _re
 from types import MappingProxyType
 from typing import NamedTuple
 from urllib.parse import quote as _url_quote
@@ -49,13 +54,38 @@ _INVALID_TIMEOUT_MESSAGE = (
     "timeout must be a finite number greater than 0 and at most 10 seconds"
 )
 _INVALID_SESSION_MESSAGE = "session must allow trust_env to be disabled"
+_USER_AGENT = "investment-assistant-public-trial/1.0"
 _REQUEST_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "investment-assistant-public-trial/1.0",
+    "User-Agent": _USER_AGENT,
+}
+_FRED_REQUEST_HEADERS = {
+    "Accept": "text/csv",
+    "User-Agent": _USER_AGENT,
 }
 # Sent through ``requests`` as separate parameters, never concatenated into the
 # URL: the request URL must end at the encoded symbol.
 _REQUEST_PARAMS = {"interval": "1d", "range": "5d"}
+
+# FRED's CSV download endpoint. The endpoint and its single parameter are fixed
+# constants, never caller input, so a FRED request has no variable part at all.
+FRED_CSV_ENDPOINT = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+_FRED_PARAMS = {"id": "DGS10"}
+_FRED_HEADER_DATE = "observation_date"
+_FRED_HEADER_LEGACY_DATE = "DATE"
+_FRED_SERIES_HEADER = "DGS10"
+_FRED_MISSING_MARKER = "."
+FRED_SYMBOL = "^TNX"
+_FRED_DATE_PATTERN = _re.compile(r"\A\d{4}-\d{2}-\d{2}\Z", _re.ASCII)
+# A DGS10 value must look like a plain decimal number before ``float`` sees
+# it: ``float`` alone would also accept underscore separators, padding
+# whitespace and non-ASCII digits, none of which a real field contains.
+_FRED_NUMBER_PATTERN = _re.compile(
+    r"\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z", _re.ASCII)
+# The one byte-order mark tolerated: a UTF-16 document cannot decode as
+# UTF-8 and never reaches the CSV reader at all.
+_UTF8_BOM = b"\xef\xbb\xbf"
+
 
 # Timestamps outside this window are treated as a broken source rather than a
 # real quote. The window avoids inventing a holiday calendar while still
@@ -348,14 +378,17 @@ def _disable_environment_credentials(session):
         raise ValueError(_INVALID_SESSION_MESSAGE) from None
 
 
-class YahooGlobalMarketProvider:
-    """Fetch one allowlisted instrument from Yahoo's keyless Chart endpoint.
+class _BoundedHttpProvider:
+    """Shared transport boundary: one bounded, unauthenticated GET per call.
 
     An injected ``session`` is a trusted test-transport seam, not an extension
-    point for carrying proxy, ``.netrc`` or other environment credentials.
+    point for carrying proxy, ``.netrc`` or other environment credentials. Only
+    the endpoint, the parameters and the parsing differ between the sources; the
+    10-second ceiling, the 1 MiB streamed cap, the redirect refusal and the
+    fixed error codes are shared here so no source can grow a weaker path.
     """
 
-    SOURCE = "yahoo_chart"
+    REQUEST_HEADERS = _REQUEST_HEADERS
 
     def __init__(self, session=None, timeout=TIMEOUT_SECONDS):
         if (type(timeout) not in (int, float) or not math.isfinite(timeout)
@@ -366,17 +399,11 @@ class YahooGlobalMarketProvider:
         self.session = configured_session
         self.timeout = timeout
 
-    def fetch(self, symbol):
-        entry = catalog_entry(symbol)
-        body = self._get(f"{YAHOO_CHART_ENDPOINT}{_url_quote(symbol, safe='')}",
-                         dict(_REQUEST_PARAMS))
-        return self._parse(body, symbol, entry)
-
     def _get(self, url, params):
         transport_failed = False
         try:
             response = self.session.get(url, params=params,
-                                        headers=dict(_REQUEST_HEADERS),
+                                        headers=dict(self.REQUEST_HEADERS),
                                         timeout=self.timeout, allow_redirects=False,
                                         stream=True)
         except GlobalMarketDataError:
@@ -433,6 +460,22 @@ class YahooGlobalMarketProvider:
             raise GlobalMarketDataError(ERROR_NETWORK) from None
         return b"".join(chunks)
 
+
+class YahooGlobalMarketProvider(_BoundedHttpProvider):
+    """Fetch one allowlisted instrument from Yahoo's keyless Chart endpoint.
+
+    An injected ``session`` is a trusted test-transport seam, not an extension
+    point for carrying proxy, ``.netrc`` or other environment credentials.
+    """
+
+    SOURCE = "yahoo_chart"
+
+    def fetch(self, symbol):
+        entry = catalog_entry(symbol)
+        body = self._get(f"{YAHOO_CHART_ENDPOINT}{_url_quote(symbol, safe='')}",
+                         dict(_REQUEST_PARAMS))
+        return self._parse(body, symbol, entry)
+
     def _parse(self, body, symbol, entry):
         payload = _decode_json(body)
         if type(payload) is not dict:
@@ -471,6 +514,40 @@ class YahooGlobalMarketProvider:
         )
 
 
+class FredTreasuryProvider(_BoundedHttpProvider):
+    """Fetch the Treasury yield from FRED's fixed ``DGS10`` CSV fallback.
+
+    The fallback exists for one instrument only. The endpoint and its single
+    parameter are module constants, so a caller cannot point this provider at
+    another series, host or query; any other symbol is refused before a request
+    is made. DGS10 is a *daily, delayed* series: it carries an observation date
+    and no time of day, so ``source_as_of`` stays ``None`` and the observation
+    date is reported verbatim instead of an invented intraday timestamp.
+    """
+
+    SOURCE = "fred_dgs10"
+    REQUEST_HEADERS = _FRED_REQUEST_HEADERS
+
+    def fetch(self, symbol):
+        # A substituted instrument here would silently turn a Treasury yield
+        # into another series, so the gate is an exact identity check and it
+        # happens before the transport boundary is reached.
+        if symbol != FRED_SYMBOL:
+            raise GlobalMarketDataError(ERROR_UNSUPPORTED_SYMBOL) from None
+        catalog_entry(symbol)  # The fallback symbol must stay in the catalog.
+        body = self._get(FRED_CSV_ENDPOINT, dict(_FRED_PARAMS))
+        pairs = _strict_fred_pairs(body)
+        previous_value, value, latest_day = pairs[-2][1], pairs[-1][1], pairs[-1][0]
+        return SourceObservation(
+            symbol=symbol,
+            value=value,
+            previous_value=previous_value,
+            source_as_of=None,
+            session_date=latest_day.isoformat(),
+            source=self.SOURCE,
+        )
+
+
 def _strict_daily_pairs(series):
     """Return the validated ``(epoch, close)`` pairs in source order."""
     indicators = series.get("indicators")
@@ -503,6 +580,101 @@ def _strict_daily_pairs(series):
             continue
         value = _number(close)
         pairs.append((seconds, value))
+    if len(pairs) < 2:
+        raise GlobalMarketDataError(ERROR_INSUFFICIENT) from None
+    return pairs
+
+
+def _strict_fred_pairs(body):
+    """Return ``(date, value)`` pairs from a FRED ``DGS10`` CSV document.
+
+    The document is remote text, so every stage fails closed with a fixed
+    code and never echoes a row, header or exception message:
+
+    * Only UTF-8 is decoded, with a UTF-8 BOM as the sole accepted prefix.
+    * The header must be exactly ``observation_date,DGS10`` or ``DATE,DGS10``
+      -- no extra, reordered or duplicated columns.
+    * The NUL byte, ragged rows and any other CSV malformation are refused.
+    * Every date must be a strict ``YYYY-MM-DD`` string naming a real
+      calendar day, and dates must strictly increase across *every* row,
+      including the ones whose value is missing.
+    * ``.`` and the empty field are FRED's "no observation"; any other
+      field must be a plain finite decimal number greater than zero.
+    * At least two usable observations must survive.
+    """
+    malformed = False
+    text = None
+    try:
+        if b"\x00" in body:
+            # A NUL can hide inside a quoted field from every later stage.
+            malformed = True
+        else:
+            text = body.decode("utf-8")
+    except (UnicodeDecodeError, AttributeError, TypeError, MemoryError):
+        # Wrong codec, a non-bytes document or an allocation failure are
+        # all a broken source as far as this parser is concerned.
+        malformed = True
+    if malformed:
+        raise GlobalMarketDataError(ERROR_MALFORMED) from None
+
+    if text.startswith("\ufeff"):
+        # The decoded UTF-8 BOM would otherwise corrupt the first header.
+        text = text[1:]
+
+    rows = []
+    reader_failed = False
+    try:
+        reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+        for row in reader:
+            if len(row) != 2:
+                reader_failed = True
+                break
+            rows.append((row[0], row[1]))
+    except (csv.Error, ValueError, TypeError, MemoryError):
+        reader_failed = True
+    if reader_failed or not rows:
+        # An empty document has no header to compare against either.
+        raise GlobalMarketDataError(ERROR_MALFORMED) from None
+
+    header_date, header_value = rows[0]
+    if (header_date, header_value) not in (
+            (_FRED_HEADER_DATE, _FRED_SERIES_HEADER),
+            (_FRED_HEADER_LEGACY_DATE, _FRED_SERIES_HEADER)):
+        raise GlobalMarketDataError(ERROR_MALFORMED) from None
+
+    pairs = []
+    previous_day = None
+    for day_text, value_text in rows[1:]:
+        if _FRED_DATE_PATTERN.match(day_text) is None:
+            raise GlobalMarketDataError(ERROR_INVALID_TIME) from None
+        parse_failed = False
+        try:
+            day = date.fromisoformat(day_text)
+        except ValueError:
+            parse_failed = True
+        if parse_failed or day.isoformat() != day_text:
+            # Impossible calendar days (``2026-02-30``) fail closed even
+            # though the ISO parser silently normalizes some of them.
+            raise GlobalMarketDataError(ERROR_INVALID_TIME) from None
+        if previous_day is not None and day <= previous_day:
+            # Duplicated, unsorted or backdated rows cannot identify
+            # "latest", regardless of whether the value is missing.
+            raise GlobalMarketDataError(ERROR_INVALID_TIME) from None
+        previous_day = day
+        if value_text in (_FRED_MISSING_MARKER, ""):
+            # FRED marks "no observation" as ``.`` or an empty field.
+            continue
+        invalid_value = _FRED_NUMBER_PATTERN.match(value_text) is None
+        if not invalid_value:
+            conversion_failed = False
+            try:
+                value = float(value_text)
+            except (OverflowError, ValueError):
+                conversion_failed = True
+            invalid_value = conversion_failed or not math.isfinite(value) or value <= 0
+        if invalid_value:
+            raise GlobalMarketDataError(ERROR_INVALID_VALUE) from None
+        pairs.append((day, value))
     if len(pairs) < 2:
         raise GlobalMarketDataError(ERROR_INSUFFICIENT) from None
     return pairs
