@@ -324,6 +324,7 @@ class LiveAcceptanceLedgerTest(unittest.TestCase):
                     ordered_trading_dates=TRADING_DATES[1:] + ("2026-09-22",),
                     calendar_coverage=SOURCE_DATES,
                     calendar_verified=True,
+                    clock=lambda: aware("2026-09-14", "09:00"),
                 )
 
             loaded = LiveTrialLedger.load(path)
