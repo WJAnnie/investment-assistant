@@ -17,7 +17,11 @@ from app.analysis.fundamental import (
     evaluate_fundamental,
     evaluate_valuation,
 )
-from app.analysis.industry import IndustryRankingPolicy, rank_industries
+from app.analysis.industry import (
+    DEFAULT_INDUSTRY_POLICY,
+    IndustryRankingPolicy,
+    rank_industries,
+)
 from app.analysis.kdj import calculate_kdj
 from app.analysis.macd import calculate_macd
 from app.analysis.rsi import calculate_rsi
@@ -36,17 +40,6 @@ from app.portfolio.structure_inputs import cycle_from_dated_lines, cycle_from_mi
 
 DEFAULT_MIN_HISTORY_BARS = 30
 MARKET_TZ = ZoneInfo("Asia/Shanghai")
-
-DEFAULT_INDUSTRY_POLICY = IndustryRankingPolicy(
-    weight_1d=Decimal("0.30"),
-    weight_5d=Decimal("0.25"),
-    weight_20d=Decimal("0.20"),
-    weight_breadth=Decimal("0.15"),
-    weight_activity=Decimal("0.10"),
-    min_coverage=8,
-    max_age_hours=96,
-    min_score=Decimal("60"),
-)
 
 DEFAULT_FUNDAMENTAL_POLICY = FundamentalPolicy(
     min_roe=Decimal("8"),

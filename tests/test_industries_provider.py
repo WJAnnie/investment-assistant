@@ -876,3 +876,203 @@ class TestAkShareIndustryProvider:
         assert obs_map["BK0420"].return_20d_pct == 4.56
         assert obs_map["BK0425"].return_5d_pct == 0.0
         assert obs_map["BK0425"].return_20d_pct == 0.0
+
+    # 37. 单行携带真实"数据时间"：生成观测的 as_of 等于该带时区时间，且不等于默认编造的 15:00
+    def test_fetch_row_with_source_data_time(self) -> None:
+        m_date = date(2026, 9, 17)
+        stamp_str = "2026-09-17T15:39:32+08:00"
+        expected_dt = datetime(2026, 9, 17, 15, 39, 32, tzinfo=SHANGHAI_TZ)
+        fabricated_dt = datetime.combine(m_date, time(15, 0), tzinfo=SHANGHAI_TZ)
+
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+                "数据时间": stamp_str,
+            }
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 1
+        assert len(res.errors) == 0
+        obs = res.observations[0]
+        assert obs.as_of == expected_dt
+        assert obs.as_of != fabricated_dt
+
+    # 38. 多行共享相同"数据时间"：全部保留且共享该 as_of
+    def test_fetch_multiple_rows_share_identical_data_time(self) -> None:
+        m_date = date(2026, 9, 17)
+        stamp_str = "2026-09-17T15:39:32+08:00"
+        expected_dt = datetime(2026, 9, 17, 15, 39, 32, tzinfo=SHANGHAI_TZ)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+                "数据时间": stamp_str,
+            },
+            {
+                "板块代码": "BK0425",
+                "板块名称": "互联网服务",
+                "涨跌幅": 1.2,
+                "换手率": 2.0,
+                "上涨家数": 50,
+                "下跌家数": 30,
+                "近5日涨跌幅": 0.5,
+                "近20日涨跌幅": 2.0,
+                "数据时间": stamp_str,
+            },
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 2
+        assert len(res.errors) == 0
+        assert res.observations[0].as_of == expected_dt
+        assert res.observations[1].as_of == expected_dt
+
+    # 39. 两行具有不同的"数据时间"：触发冲突，0条观测且所有代码均标记为 ERROR_DATE_MISMATCH
+    def test_fetch_conflicting_data_times_fails_batch(self) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+                "数据时间": "2026-09-17T15:39:32+08:00",
+            },
+            {
+                "板块代码": "BK0425",
+                "板块名称": "互联网服务",
+                "涨跌幅": 1.2,
+                "换手率": 2.0,
+                "上涨家数": 50,
+                "下跌家数": 30,
+                "近5日涨跌幅": 0.5,
+                "近20日涨跌幅": 2.0,
+                "数据时间": "2026-09-17T15:40:00+08:00",
+            },
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 0
+        assert res.errors.get("BK0420") == ERROR_DATE_MISMATCH
+        assert res.errors.get("BK0425") == ERROR_DATE_MISMATCH
+
+    # 40. 某行"数据时间"不可解析为乱码，而同批次其他行时间合法：乱码行记为 ERROR_DATE_MISMATCH，合法行成功
+    def test_fetch_unparseable_data_time_reported_as_mismatch(self) -> None:
+        m_date = date(2026, 9, 17)
+        valid_stamp = "2026-09-17T15:39:32+08:00"
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+                "数据时间": valid_stamp,
+            },
+            {
+                "板块代码": "BK0425",
+                "板块名称": "互联网服务",
+                "涨跌幅": 1.2,
+                "换手率": 2.0,
+                "上涨家数": 50,
+                "下跌家数": 30,
+                "近5日涨跌幅": 0.5,
+                "近20日涨跌幅": 2.0,
+                "数据时间": "not-a-time",
+            },
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 1
+        assert res.observations[0].code == "BK0420"
+        assert res.errors.get("BK0425") == ERROR_DATE_MISMATCH
+
+    # 41. "数据时间"晚于 fetched_at：标记 ERROR_DATE_MISMATCH
+    def test_fetch_data_time_later_than_fetched_at(self) -> None:
+        m_date = date(2026, 9, 17)
+        stamp_str = "2026-09-17T15:39:32+08:00"
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+                "数据时间": stamp_str,
+            }
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        # clock 早于数据时间 15:39:32
+        early_clock = datetime(2026, 9, 17, 15, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: early_clock)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 0
+        assert res.errors.get("BK0420") == ERROR_DATE_MISMATCH
+
+    # 42. 无"数据时间"字段：保持向后兼容，使用默认 15:00 时间戳正常成功
+    def test_fetch_no_data_time_backwards_compatibility(self) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+            }
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 1
+        assert len(res.errors) == 0
+        assert res.observations[0].as_of == datetime(2026, 9, 17, 15, 0, tzinfo=SHANGHAI_TZ)
+

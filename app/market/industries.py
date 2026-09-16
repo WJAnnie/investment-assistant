@@ -40,6 +40,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "decliners": ("下跌家数", "下跌", "decliners", "down"),
     "return_5d_pct": ("近5日涨跌幅", "5日涨跌幅", "return_5d_pct"),
     "return_20d_pct": ("近20日涨跌幅", "20日涨跌幅", "return_20d_pct"),
+    "data_time": ("数据时间", "data_time", "source_time"),
     "time": ("日期", "时间", "date", "datetime", "time"),
     "close": ("收盘", "收盘价", "close", "price", "最新价"),
 }
@@ -135,6 +136,31 @@ def _parse_date(val: Any, field_name: str) -> date:
     if hasattr(val, "date") and callable(getattr(val, "date")):
         return val.date()
     raise ValueError(f"Unsupported date type for {field_name}")
+
+
+def _parse_aware_datetime(val: Any, field_name: str) -> datetime:
+    if type(val) is bool:
+        raise ValueError(f"{field_name} cannot be a boolean")
+    if val is None:
+        raise ValueError(f"{field_name} cannot be None")
+    try:
+        if isinstance(val, datetime):
+            if val.tzinfo is None or val.tzinfo.utcoffset(val) is None:
+                raise ValueError(f"{field_name} must be timezone-aware")
+            return val.astimezone(SHANGHAI_TZ)
+        if isinstance(val, str):
+            s = val.strip()
+            if not s or len(s) > 256:
+                raise ValueError(f"{field_name} cannot be empty or too long")
+            parsed = datetime.fromisoformat(s)
+            if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+                raise ValueError(f"{field_name} must be timezone-aware")
+            return parsed.astimezone(SHANGHAI_TZ)
+        raise ValueError(f"Unsupported type for {field_name}")
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"{field_name} could not be parsed as datetime: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -276,7 +302,33 @@ class AkShareIndustryProvider:
             selected_rows = sorted_rows
             truncated = False
 
-        as_of = datetime.combine(market_date, time(15, 0), tzinfo=SHANGHAI_TZ)
+        present: list[datetime] = []
+        unparseable_codes: set[str] = set()
+
+        for row in selected_rows:
+            if not isinstance(row, Mapping):
+                continue
+            raw_dt = self._first(row, "data_time")
+            if raw_dt is None:
+                continue
+            try:
+                dt_val = _parse_aware_datetime(raw_dt, "数据时间")
+                present.append(dt_val)
+            except ValueError:
+                code_val = self._get_code_key(row)
+                if code_val:
+                    unparseable_codes.add(code_val)
+
+        if not present:
+            batch_as_of = datetime.combine(market_date, time(15, 0), tzinfo=SHANGHAI_TZ)
+            stamp_conflict = False
+        else:
+            if len(set(present)) != 1:
+                stamp_conflict = True
+                batch_as_of = max(present)
+            else:
+                stamp_conflict = False
+                batch_as_of = present[0]
 
         observations: list[IndustryObservation] = []
         errors: dict[str, str] = {}
@@ -296,6 +348,24 @@ class AkShareIndustryProvider:
                 code = _validate_code(raw_code)
             except (TypeError, ValueError):
                 errors[raw_code_str] = ERROR_MALFORMED_RESPONSE
+                continue
+
+            if stamp_conflict:
+                errors[code] = ERROR_DATE_MISMATCH
+                continue
+
+            raw_dt = self._first(row, "data_time")
+            if raw_dt is not None:
+                try:
+                    row_dt = _parse_aware_datetime(raw_dt, "数据时间")
+                except ValueError:
+                    errors[code] = ERROR_DATE_MISMATCH
+                    continue
+                if row_dt != batch_as_of:
+                    errors[code] = ERROR_DATE_MISMATCH
+                    continue
+            elif present or (code in unparseable_codes):
+                errors[code] = ERROR_DATE_MISMATCH
                 continue
 
             if code in seen_codes:
@@ -340,7 +410,7 @@ class AkShareIndustryProvider:
                 errors[code] = ERROR_MALFORMED_RESPONSE
                 continue
 
-            if as_of > fetched_at:
+            if batch_as_of > fetched_at:
                 errors[code] = ERROR_DATE_MISMATCH
                 continue
 
@@ -436,7 +506,7 @@ class AkShareIndustryProvider:
                 obs = IndustryObservation(
                     code=code,
                     name=name,
-                    as_of=as_of,
+                    as_of=batch_as_of,
                     fetched_at=fetched_at,
                     source=self.SOURCE,
                     return_1d_pct=ret_1d,

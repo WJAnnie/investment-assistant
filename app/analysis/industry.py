@@ -208,6 +208,18 @@ class IndustryRankingPolicy:
             raise ValueError("min_score must be between 0 and 100")
 
 
+DEFAULT_INDUSTRY_POLICY = IndustryRankingPolicy(
+    weight_1d=Decimal("0.30"),
+    weight_5d=Decimal("0.25"),
+    weight_20d=Decimal("0.20"),
+    weight_breadth=Decimal("0.15"),
+    weight_activity=Decimal("0.10"),
+    min_coverage=8,
+    max_age_hours=96,
+    min_score=Decimal("60"),
+)
+
+
 @dataclass(frozen=True)
 class IndustryRankedItem:
     code: str
@@ -531,6 +543,7 @@ def rank_industries(
 
 
 __all__ = [
+    "DEFAULT_INDUSTRY_POLICY",
     "IndustryObservation",
     "IndustryRankingPolicy",
     "IndustryRankedItem",
