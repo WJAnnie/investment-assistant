@@ -16,7 +16,10 @@ from app.analysis.technical_score import calculate_technical_score
 from app.analysis.trend import trend_score
 from app.chan.pipeline import analyze_chan
 from app.decision.engine import build_decision
+from app.domain.timeframe import Timeframe
 from app.market.minute.context import load_minute_context
+from app.portfolio.structure import build_structure_evidence
+from app.portfolio.structure_inputs import cycle_from_dated_lines
 
 
 DEFAULT_MIN_HISTORY_BARS = 30
@@ -123,6 +126,7 @@ def analyze_portfolio(
             "industry": "configured_labels_only",
             "news": "unavailable",
             "minute": "closure_evidence_only" if items and minute_ready == len(items) else "unavailable",
+            "structure": "dated_cycles_only",
         },
         "data_cutoff": _market_now(current_time).isoformat(),
     }
@@ -202,12 +206,19 @@ def _load_historical_analysis(
             kdj=kdj,
             trend=trend,
         )
+        structure = _structure_evidence(
+            holding.code,
+            holding.market,
+            options["period"],
+            lines,
+            current_time,
+            trend["direction"] == "UP",
+        )
         chan = analyze_chan(
             lines,
             buy_setup={
                 "trend_confirm": trend["direction"] == "UP",
-                # A second timeframe is required and is never inferred from one series.
-                "multi_cycle_confirm": False,
+                "multi_cycle_confirm": structure.ready if structure is not None else False,
             },
             prices=prices,
             macd_series=macd["hist"],
@@ -215,6 +226,24 @@ def _load_historical_analysis(
         )
     except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
         return _unavailable(f"历史K线分析失败：{type(exc).__name__}: {exc}")
+
+    structure_payload = (
+        {
+            "outcome": structure.outcome.value,
+            "ready": structure.ready,
+            "limit": structure.limit,
+            "reason_code": structure.reason_code,
+            "blocked_by": tuple(structure.blocked_by),
+            "per_cycle_status": dict(structure.per_cycle_status),
+            "stale_cycles": tuple(structure.stale_cycles),
+            "insufficient_cycles": tuple(structure.insufficient_cycles),
+            "missing_cycles": tuple(
+                name for name, s in structure.per_cycle_status.items() if s == "missing"
+            ),
+        }
+        if structure is not None
+        else None
+    )
 
     signal = chan["signal"]
     return {
@@ -252,6 +281,7 @@ def _load_historical_analysis(
         },
         "signal": signal.value,
         "decision": _decision_summary(signal.value, technical["score"]),
+        "structure": structure_payload,
     }
 
 
@@ -307,8 +337,39 @@ def _decision_summary(signal, technical_score, current_position=0.0, risk_blocke
     }
 
 
+def _structure_evidence(code, market, period, lines, cutoff, trend_confirm):
+    if not isinstance(cutoff, datetime) or cutoff.tzinfo is None or cutoff.utcoffset() is None:
+        raise ValueError("cutoff must be timezone-aware datetime")
+    if not isinstance(lines, (list, tuple)) or not lines:
+        return None
+    if period == "weekly":
+        cycle = cycle_from_dated_lines(
+            Timeframe.WEEKLY, lines, market=market, source="history_weekly"
+        )
+        cycles = {Timeframe.WEEKLY: cycle}
+    elif period == "daily":
+        cycle = cycle_from_dated_lines(
+            Timeframe.DAILY, lines, market=market, source="history_daily"
+        )
+        cycles = {Timeframe.DAILY: cycle}
+    else:
+        return None
+
+    if not cycles:
+        return None
+
+    return build_structure_evidence(
+        code=code,
+        market=market,
+        cycles=cycles,
+        cutoff=cutoff,
+        core_signal=None,
+        trend_confirm=trend_confirm,
+    )
+
+
 def _unavailable(reason):
-    return {"status": "unavailable", "reason": reason, "decision": None}
+    return {"status": "unavailable", "reason": reason, "decision": None, "structure": None}
 
 
 def _latest(values):
