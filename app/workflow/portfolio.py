@@ -11,6 +11,7 @@ import yaml
 from app.market.factory import create_portfolio_valuation_router
 from app.portfolio.calculator import build_portfolio_snapshot
 from app.portfolio.analysis import analyze_portfolio
+from app.portfolio.global_market import build_global_market, gather_global_observations
 from app.portfolio.loader import load_portfolio
 from app.portfolio.risk import apply_portfolio_risk
 from app.report.portfolio import format_failure_reminder, format_portfolio_report
@@ -20,6 +21,34 @@ from app.workflow.stage_evidence import (
     REPORT_KINDS, build_stage_evidence, compare_stage_evidence, evaluate_forecasts,
 )
 from app.workflow.stage_store import StageStore
+
+GLOBAL_MARKET_STAGES = ("global", "morning")
+
+
+def _global_market_payload(global_provider, treasury_fallback, cutoff):
+    try:
+        if global_provider is None and treasury_fallback is None:
+            return build_global_market((), cutoff, collected=False)
+        observations = gather_global_observations(global_provider, treasury_fallback)
+        return build_global_market(observations, cutoff)
+    except Exception:
+        return build_global_market((), cutoff, collected=False)
+
+
+def _analysis_gaps(analysis, global_market, report_kind):
+    gaps = []
+    if (global_market or {}).get("status") != "complete":
+        gaps.append("global_market_source")
+    limits = (analysis or {}).get("data_limits") or {}
+    if limits.get("industry") != "available":
+        gaps.append("industry_ranking")
+    if limits.get("fundamental") != "available":
+        gaps.append("fundamentals")
+    items = (analysis or {}).get("items") or ()
+    if not items or any((item.get("structure") or {}).get("ready") is not True for item in items):
+        gaps.append("weekly_structure")
+        gaps.append("minute_structure_confirmation")
+    return gaps
 
 
 def load_strategy_config(path=None):
@@ -56,6 +85,8 @@ def run_portfolio_report(
     private_state_dir=None,
     clock=None,
     run_id=None,
+    global_provider=None,
+    treasury_fallback=None,
 ):
     """Run valuation, risk analysis, rendering, and optional notification once.
 
@@ -81,8 +112,7 @@ def run_portfolio_report(
                      "chatgpt_received": False, "device_received": False},
         "full_analysis_ready": False,
         "analysis_state": "NOT_READY",
-        "analysis_gaps": ["global_market_source", "industry_ranking", "fundamentals",
-                          "weekly_structure", "minute_structure_confirmation"],
+        "analysis_gaps": _analysis_gaps(None, None, report_kind),
         "stage_context": {"persistence": {"status": "not_configured"}},
         "live_acceptance_status": "not_started",
         "errors": [],
@@ -183,6 +213,11 @@ def run_portfolio_report(
         if report_kind == "closing":
             context["forecast_evaluation"] = evaluate_forecasts(forecasts, evidence)
         result["stage_context"] = context
+        global_market = None
+        if report_kind in GLOBAL_MARKET_STAGES:
+            global_market = _global_market_payload(global_provider, treasury_fallback, current_time)
+            result["global_market"] = global_market
+        result["analysis_gaps"] = _analysis_gaps(analysis, global_market, report_kind)
         benchmark = valuations.get("HK.HSTECH")
         report = format_portfolio_report(
             snapshot,
@@ -191,6 +226,7 @@ def run_portfolio_report(
             benchmark=benchmark,
             analysis=analysis,
             stage_context=context,
+            global_market=global_market,
         )
         result["snapshot"] = snapshot
         result["report"] = report

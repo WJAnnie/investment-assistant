@@ -3,6 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 
+from app.portfolio.global_market import format_overnight_lines
 from app.utils.redaction import redact_secrets
 
 
@@ -44,21 +45,21 @@ _STRATEGIES = {
 
 
 def format_portfolio_report(snapshot, report_kind, now, benchmark=None, analysis=None,
-                            stage_context=None):
+                            stage_context=None, global_market=None):
     analysis_map = _analysis_map(analysis)
     if report_kind not in STAGE_HEADINGS:
         raise ValueError(f"unsupported report_kind: {report_kind}")
     sections = [
         _format_header(report_kind, now),
         _format_action_guidance(report_kind),
-        _format_market_context(report_kind, benchmark, analysis, snapshot),
+        _format_market_context(report_kind, benchmark, analysis, snapshot, global_market=global_market),
         *(
             _format_account(account, report_kind, analysis_map)
             for account in _ordered_accounts(snapshot.accounts)
         ),
         _format_combined(snapshot),
         _format_stage_changes(report_kind, stage_context),
-        _format_research_status(analysis, report_kind),
+        _format_research_status(analysis, report_kind, global_market=global_market),
         _format_risk(snapshot, report_kind),
         "纪律：仅供研究复核，不自动交易，不构成投资建议。",
     ]
@@ -112,7 +113,7 @@ def _format_header(report_kind, now):
     return f"📊 投资组合｜{STAGE_HEADINGS[report_kind]}\n时间：{timestamp}"
 
 
-def _format_market_context(report_kind, benchmark, analysis=None, snapshot=None):
+def _format_market_context(report_kind, benchmark, analysis=None, snapshot=None, global_market=None):
     lines = [f"市场背景：{STAGE_HEADINGS[report_kind]}"]
     if report_kind == "global":
         lines.append("关注隔夜海外风险、港股传导与全球医疗估值的日期差异。")
@@ -126,6 +127,8 @@ def _format_market_context(report_kind, benchmark, analysis=None, snapshot=None)
         lines.append(
             "核对 A 股收盘价和港股收盘价的精确端点，同时监控恒生科技指数、港股科技敞口和基金净值日期。"
         )
+    if isinstance(global_market, dict):
+        lines.extend(format_overnight_lines(global_market))
     if benchmark is not None and getattr(benchmark, "freshness", None) != "failed":
         lines.append(
             f"恒生科技指数：{_price(benchmark.price)}（{benchmark.change_percent:+.2f}%），"
@@ -379,24 +382,46 @@ def _format_benchmark_analysis(item):
     )
 
 
-def _format_research_status(analysis, report_kind):
+def _format_research_status(analysis, report_kind, global_market=None):
     coverage = (analysis or {}).get("coverage", {})
+    limits = (analysis or {}).get("data_limits") or {}
+    fundamental_line = (
+        "基本面：已接入经校验的财报/估值数据源。"
+        if limits.get("fundamental") == "available"
+        else "基本面：未接入经校验的财报/估值数据源，不生成基本面结论。"
+    )
+    industry_ranking_line = (
+        "行业排序：已接入经校验的行业数据。"
+        if limits.get("industry") == "available"
+        else "行业排序：未就绪；没有可比较的行业数据，不编造行业评分或资金流向。"
+    )
     lines = [
         "研究完整性",
         "完整分析：未就绪；流程成功不等于研究证据完整。",
         f"技术/缠论：{coverage.get('ready', 0)}/{coverage.get('total', 0)} 个持仓完成，"
         f"{coverage.get('unavailable', 0)} 个因历史数据不足或接口失败降级。",
-        "基本面：未接入经校验的财报/估值数据源，不生成基本面结论。",
+        fundamental_line,
         "行业：仅使用持仓配置中的行业标签，用于暴露统计，不等同于行业景气判断。",
         "新闻：未接入经校验的新闻源，不把未核实消息写入决策。",
         "市场环境：趋势/风险暂不评级；缺少完整跨市场证据。",
-        "行业排序：未就绪；没有可比较的行业数据，不编造行业评分或资金流向。",
+        industry_ranking_line,
     ]
     if analysis is None:
         lines.append("技术/缠论：本次未执行历史分析。")
     if report_kind in {"global", "morning"}:
-        lines.append("隔夜全球市场：美股主要指数、纳斯达克、半导体、美债、美元、黄金、原油："
-                     "完整来源及交易日期未就绪，暂不作 A 股影响判断。")
+        if not isinstance(global_market, dict) or global_market.get("status") == "not_collected":
+            lines.append("隔夜全球市场：本阶段不采集。")
+        elif global_market.get("status") in {"complete", "partial"}:
+            quotes = global_market.get("quotes") or ()
+            n = sum(1 for q in quotes if isinstance(q, dict) and q.get("error_code") is None)
+            if n == 8:
+                lines.append("隔夜全球市场：8 项隔夜行情均已获取，交易时点见各项标注。")
+            else:
+                lines.append(f"隔夜全球市场：8 项隔夜行情中已获取 {n} 项，其余暂不可用。")
+        elif global_market.get("status") == "unavailable":
+            lines.append("隔夜全球市场：暂不可用，本次不作方向判断。")
+        else:
+            lines.append("隔夜全球市场：本阶段不采集。")
     if any((item.get("minute_context") or {}).get("configured") is True
            for item in (analysis or {}).get("items", ())):
         minute_coverage = analysis.get("minute_coverage") or {}
