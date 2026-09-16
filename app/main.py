@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 
 from app.utils.logger import get_logger
-from app.market.factory import create_default_collector
+from app.market.factory import create_default_collector, create_global_market_providers
 from app.market.collector import MarketCollector
 from app.market.sina import SinaProvider
 from app.notify.feishu import FeishuNotifier
@@ -14,7 +14,7 @@ from app.report.market_snapshot import DEFAULT_MARKET_CODES, run_market_snapshot
 from app.utils.serialization import to_jsonable
 from app.utils.private_storage import require_private_execution
 from app.workflow.batch import run_daily_reports
-from app.workflow.portfolio import run_portfolio_report
+from app.workflow.portfolio import GLOBAL_MARKET_STAGES, run_portfolio_report
 from app.workflow.reminders import SHANGHAI_TZ, build_reminder_plan
 from app.workflow.scheduler import start_scheduler
 from app.workflow.stage_store import StageStore
@@ -210,6 +210,14 @@ def main(argv=None):
 
     notifier = None if args.no_notify else FeishuNotifier()
     if args.portfolio:
+        if args.report_kind in GLOBAL_MARKET_STAGES:
+            # Constructed only after the private-execution boundary above has
+            # passed. Building a provider performs no request, so a later
+            # network failure still surfaces as an isolated partial report
+            # rather than as a failed command.
+            global_provider, treasury_fallback = create_global_market_providers()
+            private_options["global_provider"] = global_provider
+            private_options["treasury_fallback"] = treasury_fallback
         result = run_portfolio_report(
             report_kind=args.report_kind,
             notifier=notifier,

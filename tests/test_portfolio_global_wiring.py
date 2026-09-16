@@ -235,3 +235,28 @@ class PortfolioGlobalWiringTests(unittest.TestCase):
                     self.assertNotIn(token, report, f"Forbidden token {token!r} in {stage} report")
                 for phrase in MANDATORY_PHRASES:
                     self.assertIn(phrase, report, f"Mandatory phrase {phrase!r} missing in {stage} report")
+
+    def test_intraday_stages_do_not_claim_a_global_market_gap(self):
+        """A stage that never collects the overnight block must not report it missing."""
+        overnight = ("global", "morning")
+        for kind in ("midday", "trading", "closing"):
+            with self.subTest(kind=kind):
+                gaps = _analysis_gaps(None, None, kind)
+                self.assertNotIn("global_market_source", gaps)
+                result = _run_stage(kind, MIDDAY_TIME)
+                self.assertNotIn("global_market", result)
+                self.assertNotIn("global_market_source", result["analysis_gaps"])
+        for kind in overnight:
+            with self.subTest(kind=kind):
+                # The stage genuinely collects it, so an absent block is a real gap.
+                self.assertIn("global_market_source", _analysis_gaps(None, None, kind))
+
+        # A completed overnight block must clear the gap entirely.
+        obs_map = _build_valid_observations()
+        result = _run_stage(
+            "morning", MORNING_TIME,
+            global_provider=FakeGlobalProvider(obs_map),
+            treasury_fallback=FakeTreasuryFallback(obs_map["^TNX"]),
+        )
+        self.assertEqual(result["global_market"]["status"], "complete")
+        self.assertNotIn("global_market_source", result["analysis_gaps"])

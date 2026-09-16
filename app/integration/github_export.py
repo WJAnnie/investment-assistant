@@ -17,10 +17,11 @@ import sys
 import tempfile
 from zoneinfo import ZoneInfo
 
+from app.market.factory import create_global_market_providers
 from app.report.portfolio import STAGE_HEADINGS
 from app.utils.redaction import is_sensitive_key, redact_secrets
 from app.utils.serialization import to_jsonable
-from app.workflow.portfolio import run_portfolio_report
+from app.workflow.portfolio import GLOBAL_MARKET_STAGES, run_portfolio_report
 
 
 SCHEMA_VERSION = 2
@@ -335,11 +336,17 @@ def _private_output_path(output, environ=None):
     return destination
 
 
-def collect_snapshot(report_kind, output, *, runner=run_portfolio_report, now=None, environ=None):
+def collect_snapshot(report_kind, output, *, runner=run_portfolio_report, now=None, environ=None,
+                     global_provider=None, treasury_fallback=None):
     """Run the portfolio workflow once and save a private account snapshot."""
     output = _private_output_path(output, environ)
     current_time = now or datetime.now(ZoneInfo(MARKET_TIMEZONE))
-    result = runner(report_kind=report_kind, notifier=None, now=current_time)
+    options = {}
+    if global_provider is not None:
+        options["global_provider"] = global_provider
+    if treasury_fallback is not None:
+        options["treasury_fallback"] = treasury_fallback
+    result = runner(report_kind=report_kind, notifier=None, now=current_time, **options)
     snapshot = build_snapshot(
         report_kind,
         result,
@@ -714,7 +721,17 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.command == "collect":
-        snapshot = collect_snapshot(args.report_kind, args.output)
+        _private_output_path(args.output)
+        global_provider = None
+        treasury_fallback = None
+        if args.report_kind in GLOBAL_MARKET_STAGES:
+            global_provider, treasury_fallback = create_global_market_providers()
+        snapshot = collect_snapshot(
+            args.report_kind,
+            args.output,
+            global_provider=global_provider,
+            treasury_fallback=treasury_fallback,
+        )
         # Exit codes distinguish outcomes for CI: a failed pipeline is 1,
         # a partial/NOT_READY run that must not be treated as a successful
         # publishable release is 2.

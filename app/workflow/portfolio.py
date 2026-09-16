@@ -37,8 +37,12 @@ def _global_market_payload(global_provider, treasury_fallback, cutoff):
 
 def _analysis_gaps(analysis, global_market, report_kind):
     gaps = []
-    if (global_market or {}).get("status") != "complete":
-        gaps.append("global_market_source")
+    # Only the overnight stages ever collect the global block; an intraday or
+    # closing stage must not report a gap for evidence it never gathers, or the
+    # missing-source list overstates what is actually unavailable.
+    if report_kind in GLOBAL_MARKET_STAGES:
+        if (global_market or {}).get("status") != "complete":
+            gaps.append("global_market_source")
     limits = (analysis or {}).get("data_limits") or {}
     if limits.get("industry") != "available":
         gaps.append("industry_ranking")

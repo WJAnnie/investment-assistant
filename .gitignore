@@ -6,3 +6,4 @@ __pycache__/
 /config/portfolio.yaml
 /.antigravity_reports/
 /.private/
+/.omx/

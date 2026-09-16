@@ -14,13 +14,19 @@ from tests.test_live_observation import make_ledger
 
 class PrivateStageCliTests(unittest.TestCase):
     def test_portfolio_passes_explicit_private_directory(self):
+        sentinel_global = object()
+        sentinel_treasury = object()
         with tempfile.TemporaryDirectory() as raw, patch.object(cli, "load_dotenv"), patch.object(
+            cli, "create_global_market_providers", return_value=(sentinel_global, sentinel_treasury)
+        ), patch.object(
             cli, "run_portfolio_report", return_value={"status": "completed"}
         ) as report, redirect_stdout(StringIO()):
             self.assertEqual(cli.main(["--portfolio", "--report-kind", "morning",
                                        "--no-notify", "--private-state-dir", raw]), 0)
             report.assert_called_once_with(report_kind="morning", notifier=None,
-                                           private_state_dir=Path(raw).resolve())
+                                           private_state_dir=Path(raw).resolve(),
+                                           global_provider=sentinel_global,
+                                           treasury_fallback=sentinel_treasury)
             self.assertEqual(list(Path(raw).iterdir()), [])
 
     def test_schedule_forwards_four_stage_profile_and_private_directory(self):
