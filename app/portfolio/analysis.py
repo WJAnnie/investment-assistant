@@ -6,10 +6,12 @@ source must not produce a made-up technical conclusion or block valuation.
 
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from math import isfinite
 from zoneinfo import ZoneInfo
 
 from app.analysis.boll import calculate_boll
+from app.analysis.industry import IndustryRankingPolicy, rank_industries
 from app.analysis.kdj import calculate_kdj
 from app.analysis.macd import calculate_macd
 from app.analysis.rsi import calculate_rsi
@@ -19,6 +21,7 @@ from app.chan.models import KLine
 from app.chan.pipeline import analyze_chan
 from app.decision.engine import build_decision
 from app.domain.bars import BarStatus
+from app.domain.evidence import EvidenceStatus
 from app.domain.timeframe import Timeframe
 from app.market.minute.context import load_minute_context
 from app.portfolio.structure import build_structure_evidence
@@ -27,6 +30,34 @@ from app.portfolio.structure_inputs import cycle_from_dated_lines, cycle_from_mi
 
 DEFAULT_MIN_HISTORY_BARS = 30
 MARKET_TZ = ZoneInfo("Asia/Shanghai")
+
+DEFAULT_INDUSTRY_POLICY = IndustryRankingPolicy(
+    weight_1d=Decimal("0.30"),
+    weight_5d=Decimal("0.25"),
+    weight_20d=Decimal("0.20"),
+    weight_breadth=Decimal("0.15"),
+    weight_activity=Decimal("0.10"),
+    min_coverage=8,
+    max_age_hours=96,
+    min_score=Decimal("60"),
+)
+
+
+def _latest_closed_mainland_market_date(current_time: datetime) -> date:
+    from app.portfolio.valuation import PortfolioValuationRouter
+
+    if current_time.tzinfo is None or current_time.utcoffset() is None:
+        dt = current_time.replace(tzinfo=MARKET_TZ)
+    else:
+        dt = current_time.astimezone(MARKET_TZ)
+    d = dt.date()
+    t = dt.time()
+    if not PortfolioValuationRouter._is_mainland_business_day(d) or t < time(15, 0):
+        candidate = d - timedelta(days=1)
+        while not PortfolioValuationRouter._is_mainland_business_day(candidate):
+            candidate -= timedelta(days=1)
+        return candidate
+    return d
 
 
 def analyze_portfolio(
@@ -41,6 +72,7 @@ def analyze_portfolio(
     min_history_bars=DEFAULT_MIN_HISTORY_BARS,
     chan_min_span=4,
     minute_snapshot_loader=None,
+    industry_provider=None,
 ):
     """Analyze each holding when enough historical bars are available."""
     if not isinstance(min_history_bars, int) or isinstance(min_history_bars, bool):
@@ -118,9 +150,38 @@ def analyze_portfolio(
         if isinstance(benchmark, dict):
             benchmark.pop("_minute_cycles_count", None)
 
+    ranking = None
+    if industry_provider is not None:
+        market_date = _latest_closed_mainland_market_date(current_time)
+        try:
+            fetch_result = industry_provider.fetch(cutoff=current_time, market_date=market_date)
+        except Exception:
+            fetch_result = None
+        if fetch_result is not None:
+            try:
+                obs = (
+                    getattr(fetch_result, "observations", None)
+                    if not isinstance(fetch_result, Mapping)
+                    else fetch_result.get("observations")
+                )
+                if obs is None:
+                    obs = ()
+                ranking = rank_industries(
+                    obs,
+                    current_time,
+                    DEFAULT_INDUSTRY_POLICY,
+                )
+            except Exception:
+                ranking = None
+
     ready_count = sum(item["status"] == "ready" for item in items)
     minute_ready = sum(item["minute_context"]["status"] == "ready" for item in items)
-    return {
+    data_limits_industry = (
+        "available"
+        if ranking is not None and ranking.stamp.status is EvidenceStatus.READY
+        else "configured_labels_only"
+    )
+    payload = {
         "items": tuple(items),
         "benchmark": benchmark,
         "coverage": {
@@ -135,13 +196,41 @@ def analyze_portfolio(
         },
         "data_limits": {
             "fundamental": "unavailable",
-            "industry": "configured_labels_only",
+            "industry": data_limits_industry,
             "news": "unavailable",
             "minute": "closure_evidence_only" if items and minute_ready == len(items) else "unavailable",
             "structure": "dated_and_minute_cycles" if minute_cycles_assembled > 0 else "dated_cycles_only",
         },
         "data_cutoff": _market_now(current_time).isoformat(),
     }
+    if industry_provider is not None:
+        if ranking is not None:
+            payload["industry_ranking"] = {
+                "status": ranking.stamp.status.value,
+                "reason_code": ranking.stamp.reason_code,
+                "as_of": ranking.stamp.as_of.isoformat(),
+                "coverage": ranking.coverage,
+                "required": ranking.required,
+                "items": tuple(
+                    {
+                        "code": it.code,
+                        "name": it.name,
+                        "rank": it.rank,
+                        "score": it.score,
+                    }
+                    for it in ranking.items
+                ),
+            }
+        else:
+            payload["industry_ranking"] = {
+                "status": "not_available",
+                "reason_code": None,
+                "as_of": None,
+                "coverage": 0,
+                "required": DEFAULT_INDUSTRY_POLICY.min_coverage,
+                "items": (),
+            }
+    return payload
 
 
 def _history_options(now, history_start, history_end, history_period, history_adjust):

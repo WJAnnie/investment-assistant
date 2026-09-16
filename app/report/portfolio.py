@@ -1,8 +1,9 @@
 """Deterministic, offline renderers for scheduled portfolio reports."""
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
+import math
 
 from app.portfolio.global_market import format_overnight_lines
 from app.utils.redaction import redact_secrets
@@ -458,22 +459,73 @@ def _format_research_status(analysis, report_kind, global_market=None):
         if limits.get("fundamental") == "available"
         else "基本面：未接入经校验的财报/估值数据源，不生成基本面结论。"
     )
-    industry_ranking_line = (
-        "行业排序：已接入经校验的行业数据。"
-        if limits.get("industry") == "available"
-        else "行业排序：未就绪；没有可比较的行业数据，不编造行业评分或资金流向。"
-    )
-    lines = [
-        "研究完整性",
-        "完整分析：未就绪；流程成功不等于研究证据完整。",
-        f"技术/缠论：{coverage.get('ready', 0)}/{coverage.get('total', 0)} 个持仓完成，"
-        f"{coverage.get('unavailable', 0)} 个因历史数据不足或接口失败降级。",
-        fundamental_line,
-        "行业：仅使用持仓配置中的行业标签，用于暴露统计，不等同于行业景气判断。",
-        "新闻：未接入经校验的新闻源，不把未核实消息写入决策。",
-        "市场环境：趋势/风险暂不评级；缺少完整跨市场证据。",
-        industry_ranking_line,
-    ]
+    industry_ranking_data = (analysis or {}).get("industry_ranking") or {}
+    raw_items = industry_ranking_data.get("items") or ()
+    valid_items = []
+    for it in raw_items:
+        score = it.get("score") if isinstance(it, dict) else getattr(it, "score", None)
+        if score is None or isinstance(score, bool):
+            continue
+        try:
+            score_float = float(score)
+            if not math.isfinite(score_float):
+                continue
+            rank_val = it.get("rank") if isinstance(it, dict) else getattr(it, "rank", None)
+            name_val = it.get("name") if isinstance(it, dict) else getattr(it, "name", None)
+            if rank_val is None or name_val is None:
+                continue
+            valid_items.append((rank_val, name_val, score_float))
+        except (TypeError, ValueError):
+            continue
+
+    if limits.get("industry") == "available" and valid_items:
+        as_of_val = industry_ranking_data.get("as_of")
+        if isinstance(as_of_val, str) and len(as_of_val) >= 10:
+            as_of_date = as_of_val[:10]
+        elif isinstance(as_of_val, (datetime, date)):
+            as_of_date = as_of_val.strftime("%Y-%m-%d")
+        else:
+            as_of_date = str(as_of_val or "")
+
+        coverage_val = industry_ranking_data.get("coverage")
+        if coverage_val is None:
+            coverage_val = len(valid_items)
+
+        industry_lines = [
+            f"行业排序：已接入经校验的行业数据（截至 {as_of_date}，共 {coverage_val} 个板块参与横向比较）。"
+        ]
+        for rank_val, name_val, score_float in valid_items[:10]:
+            industry_lines.append(f"  {rank_val}. {name_val} {score_float:.1f}")
+        industry_lines.append(
+            "行业排序说明：评分为同一截面内的横向百分位加权，仅用于相对排序，不构成买入信号。"
+        )
+        lines = [
+            "研究完整性",
+            "完整分析：未就绪；流程成功不等于研究证据完整。",
+            f"技术/缠论：{coverage.get('ready', 0)}/{coverage.get('total', 0)} 个持仓完成，"
+            f"{coverage.get('unavailable', 0)} 个因历史数据不足或接口失败降级。",
+            fundamental_line,
+            "新闻：未接入经校验的新闻源，不把未核实消息写入决策。",
+            "市场环境：趋势/风险暂不评级；缺少完整跨市场证据。",
+            *industry_lines,
+        ]
+    else:
+        industry_ranking_line = (
+            "行业排序：已接入经校验的行业数据。"
+            if limits.get("industry") == "available"
+            else "行业排序：未就绪；没有可比较的行业数据，不编造行业评分或资金流向。"
+        )
+        lines = [
+            "研究完整性",
+            "完整分析：未就绪；流程成功不等于研究证据完整。",
+            f"技术/缠论：{coverage.get('ready', 0)}/{coverage.get('total', 0)} 个持仓完成，"
+            f"{coverage.get('unavailable', 0)} 个因历史数据不足或接口失败降级。",
+            fundamental_line,
+            "行业：仅使用持仓配置中的行业标签，用于暴露统计，不等同于行业景气判断。",
+            "新闻：未接入经校验的新闻源，不把未核实消息写入决策。",
+            "市场环境：趋势/风险暂不评级；缺少完整跨市场证据。",
+            industry_ranking_line,
+        ]
     if analysis is None:
         lines.append("技术/缠论：本次未执行历史分析。")
     if report_kind in {"global", "morning"}:

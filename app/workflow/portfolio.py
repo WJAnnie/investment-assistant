@@ -91,6 +91,7 @@ def run_portfolio_report(
     run_id=None,
     global_provider=None,
     treasury_fallback=None,
+    industry_provider=None,
 ):
     """Run valuation, risk analysis, rendering, and optional notification once.
 
@@ -182,6 +183,7 @@ def run_portfolio_report(
                 min_history_bars=min_history_bars,
                 chan_min_span=chan_min_span,
                 minute_snapshot_loader=minute_snapshot_loader,
+                industry_provider=industry_provider,
             )
             result["analysis"] = analysis
             if (analysis.get("coverage") or {}).get("ready", 0) > 0:
