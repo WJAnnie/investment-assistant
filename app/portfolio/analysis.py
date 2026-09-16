@@ -172,8 +172,9 @@ def _load_historical_analysis(
         return _unavailable(f"历史K线校验失败：{type(exc).__name__}: {exc}")
     if not isinstance(lines, list) or len(lines) < min_history_bars:
         count = len(lines) if isinstance(lines, list) else 0
+        period_label = "当周" if options.get("period") == "weekly" else "当日"
         suffix = (
-            f"，已排除{excluded_incomplete_bars}根未完成当日K线"
+            f"，已排除{excluded_incomplete_bars}根未完成{period_label}K线"
             if excluded_incomplete_bars else ""
         )
         return _unavailable(
@@ -327,31 +328,50 @@ def _market_now(value):
 
 
 def _filter_completed_lines(lines, current_time, period, market):
-    if period != "daily":
-        raise ValueError("非日线周期尚无经过验证的闭合契约")
+    if period not in ("daily", "weekly"):
+        raise ValueError("非日线或周线周期尚无经过验证的闭合契约")
     if market not in ("CN", "HK"):
-        raise ValueError("该市场尚无经过验证的日线闭合契约")
+        raise ValueError(f"该市场尚无经过验证的{period}闭合契约")
     if not isinstance(lines, list) or not lines:
         return lines, 0
     local_now = _market_now(current_time)
-    cutoff = time(16, 10) if market == "HK" else time(15, 0)
     current_date = local_now.date()
     filtered = []
     excluded = 0
     previous_date = None
-    for line in lines:
-        line_date = _line_date(getattr(line, "time", None))
-        if line_date is None:
-            raise ValueError("日K线日期无法解析")
-        if previous_date is not None and line_date <= previous_date:
-            raise ValueError("日K线日期必须严格递增且不得重复")
-        previous_date = line_date
-        is_future = line_date > current_date
-        is_incomplete = line_date == current_date and local_now.time() < cutoff
-        if is_future or is_incomplete:
-            excluded += 1
-            continue
-        filtered.append(line)
+    if period == "daily":
+        cutoff = time(16, 10) if market == "HK" else time(15, 0)
+        for line in lines:
+            line_date = _line_date(getattr(line, "time", None))
+            if line_date is None:
+                raise ValueError("日K线日期无法解析")
+            if previous_date is not None and line_date <= previous_date:
+                raise ValueError("日K线日期必须严格递增且不得重复")
+            previous_date = line_date
+            is_future = line_date > current_date
+            is_incomplete = line_date == current_date and local_now.time() < cutoff
+            if is_future or is_incomplete:
+                excluded += 1
+                continue
+            filtered.append(line)
+    elif period == "weekly":
+        current_iso = (current_date.isocalendar().year, current_date.isocalendar().week)
+        previous_iso = None
+        for line in lines:
+            line_date = _line_date(getattr(line, "time", None))
+            if line_date is None:
+                raise ValueError("周K线日期无法解析")
+            if previous_date is not None and line_date <= previous_date:
+                raise ValueError("周K线日期必须严格递增且不得重复")
+            line_iso = (line_date.isocalendar().year, line_date.isocalendar().week)
+            if previous_iso is not None and line_iso <= previous_iso:
+                raise ValueError("周K线所属周必须严格递增且不得重复")
+            previous_date = line_date
+            previous_iso = line_iso
+            if line_iso >= current_iso:
+                excluded += 1
+                continue
+            filtered.append(line)
     return filtered, excluded
 
 
