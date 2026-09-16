@@ -609,6 +609,95 @@ class MultiCycleConfirmTests(unittest.TestCase):
         self.assertIn("core_signal", res_sell.blocked_by)
         self.assertEqual(res_sell.reason_code, "UNCONFIRMED_STRUCTURE")
 
+    def test_13_min_bars_by_cycle(self):
+        cutoff = _aware_dt(hour=15, minute=0)
+        # 120m 只有 2 根，其余周期 3 根
+        evidences = []
+        for tf in ROLE_ORDER:
+            cnt = 2 if tf == Timeframe.MIN_120 else 3
+            evidences.append(
+                _make_evidence(
+                    tf, status=BarStatus.CLOSED, bar_count=cnt, cutoff=cutoff
+                )
+            )
+
+        # 1. 120m 只有 2 根但门槛为 3（其余周期满足）
+        # -> WAIT + "120m" in unavailable_cycles + reason_code "STRUCTURE_INCOMPLETE"
+        res_wait = confirm_multi_cycle(
+            evidences,
+            cutoff=cutoff,
+            core_signal=ChanSignal.SECOND_BUY,
+            trend_confirm=True,
+            min_bars_by_cycle={Timeframe.MIN_120: 3},
+        )
+        self.assertEqual(res_wait.outcome, ConfirmOutcome.WAIT)
+        self.assertIn("120m", res_wait.unavailable_cycles)
+        self.assertEqual(res_wait.reason_code, "STRUCTURE_INCOMPLETE")
+        self.assertIn("120m", res_wait.blocked_by)
+
+        # 2. 同一份数据，把 min_bars_by_cycle 设为 {MIN_120: 2} 且 core_signal=SECOND_BUY、trend_confirm=True
+        # -> CONFIRMED（证明按周期门槛真的生效）
+        res_confirmed = confirm_multi_cycle(
+            evidences,
+            cutoff=cutoff,
+            core_signal=ChanSignal.SECOND_BUY,
+            trend_confirm=True,
+            min_bars_by_cycle={Timeframe.MIN_120: 2},
+        )
+        self.assertEqual(res_confirmed.outcome, ConfirmOutcome.CONFIRMED)
+        self.assertEqual(res_confirmed.blocked_by, ())
+        self.assertNotIn("120m", res_confirmed.unavailable_cycles)
+
+        # 3. 校验非法输入
+        # 非 Mapping（如 list）-> TypeError
+        with self.assertRaises(TypeError):
+            confirm_multi_cycle(
+                evidences, cutoff=cutoff, min_bars_by_cycle=[(Timeframe.MIN_120, 2)]  # type: ignore[arg-type]
+            )
+
+        # 键不是 Timeframe -> ValueError
+        with self.assertRaises(ValueError):
+            confirm_multi_cycle(
+                evidences, cutoff=cutoff, min_bars_by_cycle={"120m": 2}  # type: ignore[dict-item]
+            )
+
+        # 值为 True / 0 / -1 / 3.0 -> TypeError 或 ValueError
+        with self.assertRaises(TypeError):
+            confirm_multi_cycle(
+                evidences, cutoff=cutoff, min_bars_by_cycle={Timeframe.MIN_120: True}  # type: ignore[dict-item]
+            )
+        with self.assertRaises(TypeError):
+            confirm_multi_cycle(
+                evidences, cutoff=cutoff, min_bars_by_cycle={Timeframe.MIN_120: 3.0}  # type: ignore[dict-item]
+            )
+        with self.assertRaises(ValueError):
+            confirm_multi_cycle(
+                evidences, cutoff=cutoff, min_bars_by_cycle={Timeframe.MIN_120: 0}
+            )
+        with self.assertRaises(ValueError):
+            confirm_multi_cycle(
+                evidences, cutoff=cutoff, min_bars_by_cycle={Timeframe.MIN_120: -1}
+            )
+
+        # 4. 默认 None 时与只传 min_bars_per_cycle=3 的结果一致（outcome 与 blocked_by 相同）
+        res_default = confirm_multi_cycle(
+            evidences,
+            cutoff=cutoff,
+            core_signal=ChanSignal.SECOND_BUY,
+            trend_confirm=True,
+        )
+        res_explicit = confirm_multi_cycle(
+            evidences,
+            cutoff=cutoff,
+            core_signal=ChanSignal.SECOND_BUY,
+            trend_confirm=True,
+            min_bars_per_cycle=3,
+            min_bars_by_cycle=None,
+        )
+        self.assertEqual(res_default.outcome, res_explicit.outcome)
+        self.assertEqual(res_default.blocked_by, res_explicit.blocked_by)
+        self.assertEqual(res_default.unavailable_cycles, res_explicit.unavailable_cycles)
+
 
 if __name__ == "__main__":
     unittest.main()

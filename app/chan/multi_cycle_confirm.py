@@ -1,11 +1,13 @@
 """Multi-cycle Chan confirmation engine (R03, R05, R06, R07, R08).
 
 Pure Python standard-library implementation (no pandas/numpy/yaml/network).
-Cross-cycle validation across 6 timeframes with fail-closed evidence gate.
+Cross-cycle validation across 6 timeframes with fail-closed evidence gate
+and configurable per-cycle minimum bar depth thresholds.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -165,6 +167,7 @@ def confirm_multi_cycle(
     trend_confirm: bool = False,
     source: str = "multi_cycle_confirm",
     min_bars_per_cycle: int = 3,
+    min_bars_by_cycle: Mapping[Timeframe, int] | None = None,
 ) -> MultiCycleConfirmResult:
     # 校验 cutoff
     if not isinstance(cutoff, datetime):
@@ -183,6 +186,24 @@ def confirm_multi_cycle(
         if not isinstance(min_bars_per_cycle, int) or type(min_bars_per_cycle) is bool:
             raise TypeError("min_bars_per_cycle must be a positive integer")
         raise ValueError("min_bars_per_cycle must be a positive integer")
+
+    # 校验 min_bars_by_cycle
+    if min_bars_by_cycle is not None:
+        if not isinstance(min_bars_by_cycle, Mapping):
+            raise TypeError("min_bars_by_cycle must be a Mapping")
+        for k, v in min_bars_by_cycle.items():
+            if not isinstance(k, Timeframe) or k not in ROLE_ORDER:
+                raise ValueError(
+                    f"min_bars_by_cycle keys must be Timeframe instances in ROLE_ORDER, got {k!r}"
+                )
+            if type(v) is not int or isinstance(v, bool):
+                raise TypeError(
+                    f"min_bars_by_cycle values must be strict integers, got {type(v).__name__}"
+                )
+            if v <= 0:
+                raise ValueError(
+                    f"min_bars_by_cycle values must be positive integers, got {v}"
+                )
 
     # 校验 source
     if not isinstance(source, str):
@@ -253,10 +274,15 @@ def confirm_multi_cycle(
     unavailable_cycles_list: list[str] = []
 
     for tf in ROLE_ORDER:
+        threshold = (
+            min_bars_by_cycle.get(tf, min_bars_per_cycle)
+            if min_bars_by_cycle is not None
+            else min_bars_per_cycle
+        )
         ev = evidence_by_tf.get(tf)
         if ev is None:
             unavailable_cycles_list.append(tf.value)
-        elif len(ev.bars) < min_bars_per_cycle:
+        elif len(ev.bars) < threshold:
             unavailable_cycles_list.append(tf.value)
         elif ev.status in (BarStatus.MISSING, BarStatus.STALE, BarStatus.INVALID):
             unavailable_cycles_list.append(tf.value)
