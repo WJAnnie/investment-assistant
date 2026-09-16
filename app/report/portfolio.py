@@ -454,8 +454,19 @@ def _format_benchmark_analysis(item):
 def _format_research_status(analysis, report_kind, global_market=None):
     coverage = (analysis or {}).get("coverage", {})
     limits = (analysis or {}).get("data_limits") or {}
+    fundamental_data = (analysis or {}).get("fundamental") or {}
+    f_ready = fundamental_data.get("ready")
+    if f_ready is None or isinstance(f_ready, bool):
+        f_ready = 0
+    f_eligible = fundamental_data.get("eligible")
+    if f_eligible is None or isinstance(f_eligible, bool):
+        f_eligible = 0
+    f_criterion_passed = fundamental_data.get("criterion_passed")
+    if f_criterion_passed is None or isinstance(f_criterion_passed, bool):
+        f_criterion_passed = 0
+
     fundamental_line = (
-        "基本面：已接入经校验的财报/估值数据源。"
+        f"基本面：已接入经校验的财报/估值数据源（{f_ready}/{f_eligible} 个 A 股持仓通过校验，{f_criterion_passed} 个满足基本面标准）。"
         if limits.get("fundamental") == "available"
         else "基本面：未接入经校验的财报/估值数据源，不生成基本面结论。"
     )

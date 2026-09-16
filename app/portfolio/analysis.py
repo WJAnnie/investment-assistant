@@ -11,6 +11,12 @@ from math import isfinite
 from zoneinfo import ZoneInfo
 
 from app.analysis.boll import calculate_boll
+from app.analysis.fundamental import (
+    FundamentalPolicy,
+    ValuationPolicy,
+    evaluate_fundamental,
+    evaluate_valuation,
+)
 from app.analysis.industry import IndustryRankingPolicy, rank_industries
 from app.analysis.kdj import calculate_kdj
 from app.analysis.macd import calculate_macd
@@ -41,6 +47,122 @@ DEFAULT_INDUSTRY_POLICY = IndustryRankingPolicy(
     max_age_hours=96,
     min_score=Decimal("60"),
 )
+
+DEFAULT_FUNDAMENTAL_POLICY = FundamentalPolicy(
+    min_roe=Decimal("8"),
+    min_eps=Decimal("0"),
+    min_revenue_growth=Decimal("0"),
+    min_profit_growth=Decimal("0"),
+    max_age_days=400,
+)
+
+DEFAULT_VALUATION_POLICY = ValuationPolicy(
+    max_pe=Decimal("60"),
+    max_pb=Decimal("10"),
+    max_ps=Decimal("30"),
+    max_age_days=30,
+)
+
+
+def _is_supported_a_share(code, market, instrument_type) -> bool:
+    if market != "CN" or instrument_type != "stock":
+        return False
+    if type(code) is not str:
+        return False
+    if len(code) != 6 or not code.isascii() or not code.isdigit():
+        return False
+    if code.startswith(("6", "0", "3", "4", "8")) or code.startswith("92"):
+        return True
+    return False
+
+
+def _finite_metric(val):
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float, Decimal)):
+        if isinstance(val, float) and not isfinite(val):
+            return None
+        if isinstance(val, Decimal) and not val.is_finite():
+            return None
+        return val
+    return None
+
+
+def _evaluate_stock_fundamental(provider, code: str, current_time: datetime) -> dict:
+    try:
+        fetch_result = provider.fetch(code, current_time)
+    except Exception:
+        fetch_result = None
+
+    if fetch_result is None:
+        return {
+            "status": "not_available",
+            "reason_code": None,
+            "criterion_passed": False,
+            "complete": False,
+            "roe_pct": None,
+            "revenue_growth_pct": None,
+            "net_profit_growth_pct": None,
+            "eps": None,
+            "pe_ttm": None,
+            "pb": None,
+            "ps": None,
+        }
+
+    fundamental_obs = getattr(fetch_result, "fundamental", None)
+    valuation_obs = getattr(fetch_result, "valuation", None)
+
+    try:
+        fund_gate = evaluate_fundamental(fundamental_obs, current_time, DEFAULT_FUNDAMENTAL_POLICY)
+    except Exception:
+        fund_gate = None
+
+    try:
+        val_gate = evaluate_valuation(valuation_obs, current_time, DEFAULT_VALUATION_POLICY)
+    except Exception:
+        val_gate = None
+
+    if fund_gate is None or val_gate is None:
+        status = "not_available"
+        reason_code = None
+        complete = False
+        criterion_passed = False
+    elif fund_gate.stamp.status == EvidenceStatus.READY and val_gate.stamp.status == EvidenceStatus.READY:
+        status = EvidenceStatus.READY.value
+        reason_code = None
+        complete = bool(fund_gate.complete and val_gate.complete)
+        criterion_passed = bool(fund_gate.criterion_passed and val_gate.criterion_passed)
+    else:
+        if EvidenceStatus.FAILED in (fund_gate.stamp.status, val_gate.stamp.status):
+            failed_gate = fund_gate if fund_gate.stamp.status == EvidenceStatus.FAILED else val_gate
+            status = EvidenceStatus.FAILED.value
+            reason_code = failed_gate.stamp.reason_code
+        elif EvidenceStatus.DEGRADED in (fund_gate.stamp.status, val_gate.stamp.status):
+            degraded_gate = fund_gate if fund_gate.stamp.status == EvidenceStatus.DEGRADED else val_gate
+            status = EvidenceStatus.DEGRADED.value
+            reason_code = degraded_gate.stamp.reason_code
+        elif fund_gate.stamp.status != EvidenceStatus.READY:
+            status = fund_gate.stamp.status.value
+            reason_code = fund_gate.stamp.reason_code
+        else:
+            status = val_gate.stamp.status.value
+            reason_code = val_gate.stamp.reason_code
+        complete = bool(fund_gate.complete and val_gate.complete)
+        criterion_passed = bool(fund_gate.criterion_passed and val_gate.criterion_passed)
+
+    return {
+        "status": status,
+        "reason_code": reason_code,
+        "criterion_passed": criterion_passed,
+        "complete": complete,
+        "roe_pct": _finite_metric(getattr(fundamental_obs, "roe_pct", None)),
+        "revenue_growth_pct": _finite_metric(getattr(fundamental_obs, "revenue_growth_pct", None)),
+        "net_profit_growth_pct": _finite_metric(getattr(fundamental_obs, "net_profit_growth_pct", None)),
+        "eps": _finite_metric(getattr(fundamental_obs, "eps", None)),
+        "pe_ttm": _finite_metric(getattr(valuation_obs, "pe_ttm", None)),
+        "pb": _finite_metric(getattr(valuation_obs, "pb", None)),
+        "ps": _finite_metric(getattr(valuation_obs, "ps", None)),
+    }
 
 
 def _latest_closed_mainland_market_date(current_time: datetime) -> date:
@@ -73,6 +195,7 @@ def analyze_portfolio(
     chan_min_span=4,
     minute_snapshot_loader=None,
     industry_provider=None,
+    fundamental_provider=None,
 ):
     """Analyze each holding when enough historical bars are available."""
     if not isinstance(min_history_bars, int) or isinstance(min_history_bars, bool):
@@ -94,6 +217,7 @@ def analyze_portfolio(
         for item in account.holdings
     }
     cache = {}
+    fundamental_cache = {}
     items = []
     minute_cycles_assembled = 0
 
@@ -133,6 +257,14 @@ def analyze_portfolio(
                     current_position=float(snapshot_item.account_weight),
                     risk_blocked="高集中度风险" in snapshot_item.warnings,
                 )
+            if fundamental_provider is not None and _is_supported_a_share(
+                holding.code, holding.market, holding.instrument_type
+            ):
+                if holding.code not in fundamental_cache:
+                    fundamental_cache[holding.code] = _evaluate_stock_fundamental(
+                        fundamental_provider, holding.code, current_time
+                    )
+                item["fundamental"] = dict(fundamental_cache[holding.code])
             items.append(item)
 
     for item in items:
@@ -181,6 +313,22 @@ def analyze_portfolio(
         if ranking is not None and ranking.stamp.status is EvidenceStatus.READY
         else "configured_labels_only"
     )
+
+    eligible_fundamental = sum(1 for it in items if "fundamental" in it)
+    ready_fundamental = sum(
+        1 for it in items
+        if "fundamental" in it and str(it["fundamental"].get("status", "")).upper() == "READY"
+    )
+    passed_fundamental = sum(
+        1 for it in items
+        if "fundamental" in it and it["fundamental"].get("criterion_passed") is True
+    )
+    data_limits_fundamental = (
+        "available"
+        if fundamental_provider is not None and eligible_fundamental > 0 and ready_fundamental == eligible_fundamental
+        else "unavailable"
+    )
+
     payload = {
         "items": tuple(items),
         "benchmark": benchmark,
@@ -195,7 +343,7 @@ def analyze_portfolio(
             "unavailable": len(items) - minute_ready,
         },
         "data_limits": {
-            "fundamental": "unavailable",
+            "fundamental": data_limits_fundamental,
             "industry": data_limits_industry,
             "news": "unavailable",
             "minute": "closure_evidence_only" if items and minute_ready == len(items) else "unavailable",
@@ -203,6 +351,13 @@ def analyze_portfolio(
         },
         "data_cutoff": _market_now(current_time).isoformat(),
     }
+    if fundamental_provider is not None:
+        payload["fundamental"] = {
+            "status": "available" if (eligible_fundamental > 0 and ready_fundamental == eligible_fundamental) else "not_available",
+            "eligible": eligible_fundamental,
+            "ready": ready_fundamental,
+            "criterion_passed": passed_fundamental,
+        }
     if industry_provider is not None:
         if ranking is not None:
             payload["industry_ranking"] = {
