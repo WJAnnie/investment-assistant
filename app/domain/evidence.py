@@ -62,6 +62,10 @@ REASON_CODES: tuple[str, ...] = (
     "STRUCTURE_DATA_MISSING",
     "STRUCTURE_UNAVAILABLE",
     "STRUCTURE_INCOMPLETE",
+    "FUNDAMENTAL_CRITERION_FAILED",
+    "VALUATION_CRITERION_FAILED",
+    "INDUSTRY_CRITERION_FAILED",
+    "STRUCTURE_CRITERION_FAILED",
 )
 
 
@@ -109,13 +113,9 @@ class EvidenceStamp:
             )
 
         if self.as_of > self.cutoff:
-            raise ValueError(
-                f"as_of ({self.as_of.isoformat()}) cannot be later than cutoff ({self.cutoff.isoformat()})"
-            )
+            raise ValueError("as_of cannot be later than cutoff")
         if self.as_of > self.fetched_at:
-            raise ValueError(
-                f"as_of ({self.as_of.isoformat()}) cannot be later than fetched_at ({self.fetched_at.isoformat()})"
-            )
+            raise ValueError("as_of cannot be later than fetched_at")
 
         if self.status == EvidenceStatus.READY:
             if self.reason_code is not None:
@@ -131,12 +131,21 @@ class EvidenceStamp:
                 )
 
 
+GATE_CRITERION_CODES: dict[str, str] = {
+    "industry": "INDUSTRY_CRITERION_FAILED",
+    "fundamental": "FUNDAMENTAL_CRITERION_FAILED",
+    "valuation": "VALUATION_CRITERION_FAILED",
+    "structure": "STRUCTURE_CRITERION_FAILED",
+}
+
+
 @dataclass(frozen=True)
 class GateEvidence:
     name: str
     stamp: EvidenceStamp
     complete: bool
     criterion_passed: bool
+    criterion_code: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -147,6 +156,18 @@ class GateEvidence:
             raise TypeError("complete must be a strict bool (True or False)")
         if type(self.criterion_passed) is not bool:
             raise TypeError("criterion_passed must be a strict bool (True or False)")
+
+        if self.criterion_passed is True:
+            if self.criterion_code is not None:
+                raise ValueError("criterion_code must be None when criterion_passed is True")
+        else:
+            expected_code = GATE_CRITERION_CODES.get(
+                self.name, f"{self.name.upper()}_CRITERION_FAILED"
+            )
+            if self.criterion_code != expected_code:
+                raise ValueError(
+                    f"criterion_code must be {expected_code!r} when criterion_passed is False, got {self.criterion_code!r}"
+                )
 
     @property
     def passed(self) -> bool:
@@ -194,7 +215,11 @@ class AnalysisEvidenceBundle:
         codes: list[str] = []
         for gate in (self.industry, self.fundamental, self.valuation, self.structure):
             if not gate.passed:
-                code = gate.stamp.reason_code or f"{gate.name.upper()}_INCOMPLETE"
+                code = (
+                    gate.stamp.reason_code
+                    or gate.criterion_code
+                    or f"{gate.name.upper()}_INCOMPLETE"
+                )
                 codes.append(code)
         return tuple(codes)
 
@@ -204,6 +229,7 @@ __all__ = [
     "Freshness",
     "MAX_SOURCE_LENGTH",
     "REASON_CODES",
+    "GATE_CRITERION_CODES",
     "EvidenceStamp",
     "GateEvidence",
     "AnalysisEvidenceBundle",

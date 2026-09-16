@@ -97,6 +97,10 @@ class ReasonCodesTests(unittest.TestCase):
         self.assertIn("SOURCE_UNAVAILABLE", REASON_CODES)
         self.assertIn("INCOMPLETE_DATA", REASON_CODES)
         self.assertIn("UNCONFIRMED_STRUCTURE", REASON_CODES)
+        self.assertIn("FUNDAMENTAL_CRITERION_FAILED", REASON_CODES)
+        self.assertIn("VALUATION_CRITERION_FAILED", REASON_CODES)
+        self.assertIn("INDUSTRY_CRITERION_FAILED", REASON_CODES)
+        self.assertIn("STRUCTURE_CRITERION_FAILED", REASON_CODES)
 
 
 class EvidenceStampValidationTests(unittest.TestCase):
@@ -170,6 +174,22 @@ class EvidenceStampValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _valid_stamp(as_of=t0 + timedelta(seconds=1), fetched_at=t0)
 
+    def test_source_and_as_of_errors_do_not_leak_raw_content(self):
+        t0 = _aware_dt(0)
+        secret_source = "TOKEN_SECRET_KEY_123456" + "S" * 200
+        try:
+            _valid_stamp(source=secret_source)
+            self.fail("Should have raised ValueError")
+        except ValueError as exc:
+            self.assertNotIn("TOKEN_SECRET_KEY_123456", str(exc))
+
+        future_as_of = t0 + timedelta(days=10)
+        try:
+            _valid_stamp(as_of=future_as_of, cutoff=t0)
+            self.fail("Should have raised ValueError")
+        except ValueError as exc:
+            self.assertNotIn(future_as_of.isoformat(), str(exc))
+
     def test_rejects_ready_with_reason_code(self):
         with self.assertRaises(ValueError):
             _valid_stamp(status=EvidenceStatus.READY, reason_code="DATA_MISSING")
@@ -199,9 +219,45 @@ class EvidenceStampValidationTests(unittest.TestCase):
 class GateEvidenceTests(unittest.TestCase):
     def test_complete_data_does_not_pass_when_domain_criterion_fails(self):
         gate = GateEvidence(
-            "fundamental", _valid_stamp(), complete=True, criterion_passed=False,
+            "fundamental",
+            _valid_stamp(),
+            complete=True,
+            criterion_passed=False,
+            criterion_code="FUNDAMENTAL_CRITERION_FAILED",
         )
         self.assertFalse(gate.passed)
+
+    def test_criterion_code_must_be_none_when_criterion_passed_is_true(self):
+        ready_stamp = _valid_stamp()
+        with self.assertRaises(ValueError):
+            GateEvidence(
+                "fundamental",
+                ready_stamp,
+                complete=True,
+                criterion_passed=True,
+                criterion_code="FUNDAMENTAL_CRITERION_FAILED",
+            )
+
+    def test_criterion_code_must_match_fixed_code_when_criterion_passed_is_false(self):
+        ready_stamp = _valid_stamp()
+        with self.assertRaises(ValueError):
+            GateEvidence("fundamental", ready_stamp, complete=True, criterion_passed=False)
+        with self.assertRaises(ValueError):
+            GateEvidence(
+                "fundamental",
+                ready_stamp,
+                complete=True,
+                criterion_passed=False,
+                criterion_code="VALUATION_CRITERION_FAILED",
+            )
+        gate = GateEvidence(
+            "fundamental",
+            ready_stamp,
+            complete=True,
+            criterion_passed=False,
+            criterion_code="FUNDAMENTAL_CRITERION_FAILED",
+        )
+        self.assertEqual(gate.criterion_code, "FUNDAMENTAL_CRITERION_FAILED")
 
     def test_requires_strict_bool_for_complete(self):
         ready_stamp = _valid_stamp()
@@ -251,19 +307,30 @@ class GateEvidenceTests(unittest.TestCase):
 
 
 class AnalysisEvidenceBundleTests(unittest.TestCase):
-    def _make_gate(self, name: str, passed: bool, reason_code: str | None = None) -> GateEvidence:
+    def _make_gate(
+        self,
+        name: str,
+        passed: bool,
+        reason_code: str | None = None,
+        criterion_passed: bool = False,
+    ) -> GateEvidence:
         if passed:
             stamp = _valid_stamp(status=EvidenceStatus.READY, freshness=Freshness.RECENT)
-            return GateEvidence(name=name, stamp=stamp, complete=True,
-                                criterion_passed=True)
+            return GateEvidence(name=name, stamp=stamp, complete=True, criterion_passed=True)
         code = reason_code or "DATA_MISSING"
         stamp = _valid_stamp(
             status=EvidenceStatus.NOT_READY,
             freshness=Freshness.RECENT,
             reason_code=code,
         )
-        return GateEvidence(name=name, stamp=stamp, complete=False,
-                            criterion_passed=False)
+        crit_code = None if criterion_passed else f"{name.upper()}_CRITERION_FAILED"
+        return GateEvidence(
+            name=name,
+            stamp=stamp,
+            complete=False,
+            criterion_passed=criterion_passed,
+            criterion_code=crit_code,
+        )
 
     def test_ready_only_when_all_four_passed(self):
         all_passed = AnalysisEvidenceBundle(
@@ -297,6 +364,61 @@ class AnalysisEvidenceBundleTests(unittest.TestCase):
         )
         self.assertFalse(bundle.ready)
         self.assertEqual(bundle.blocked_by, ("STRUCTURE_INCOMPLETE",))
+
+    def test_blocked_by_prioritizes_stamp_reason_then_criterion_then_incomplete(self):
+        # 1. stamp.reason_code takes top priority even if criterion failed
+        stamp_stale = _valid_stamp(
+            status=EvidenceStatus.NOT_READY,
+            freshness=Freshness.STALE,
+            reason_code="DATA_STALE",
+        )
+        gate_stale = GateEvidence(
+            name="fundamental",
+            stamp=stamp_stale,
+            complete=True,
+            criterion_passed=False,
+            criterion_code="FUNDAMENTAL_CRITERION_FAILED",
+        )
+        bundle1 = AnalysisEvidenceBundle(
+            industry=self._make_gate("industry", True),
+            fundamental=gate_stale,
+            valuation=self._make_gate("valuation", True),
+            structure=self._make_gate("structure", True),
+        )
+        self.assertEqual(bundle1.blocked_by, ("DATA_STALE",))
+
+        # 2. criterion_code takes second priority when stamp is READY without reason_code
+        ready_stamp = _valid_stamp(status=EvidenceStatus.READY, freshness=Freshness.RECENT)
+        gate_crit_failed = GateEvidence(
+            name="valuation",
+            stamp=ready_stamp,
+            complete=True,
+            criterion_passed=False,
+            criterion_code="VALUATION_CRITERION_FAILED",
+        )
+        bundle2 = AnalysisEvidenceBundle(
+            industry=self._make_gate("industry", True),
+            fundamental=self._make_gate("fundamental", True),
+            valuation=gate_crit_failed,
+            structure=self._make_gate("structure", True),
+        )
+        self.assertEqual(bundle2.blocked_by, ("VALUATION_CRITERION_FAILED",))
+
+        # 3. INCOMPLETE takes third priority when both stamp.reason_code and criterion_code are None
+        gate_incomplete = GateEvidence(
+            name="structure",
+            stamp=ready_stamp,
+            complete=False,
+            criterion_passed=True,
+            criterion_code=None,
+        )
+        bundle3 = AnalysisEvidenceBundle(
+            industry=self._make_gate("industry", True),
+            fundamental=self._make_gate("fundamental", True),
+            valuation=self._make_gate("valuation", True),
+            structure=gate_incomplete,
+        )
+        self.assertEqual(bundle3.blocked_by, ("STRUCTURE_INCOMPLETE",))
 
     def test_bundle_is_frozen_immutable(self):
         bundle = AnalysisEvidenceBundle(
