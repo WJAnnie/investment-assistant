@@ -13,7 +13,8 @@
 
 `publishable=true` 只表示 current 通过数据交接检查，不表示允许公开，也不证明已经推送或
 ChatGPT 已收到。公开入口保护已部署。私有存储仓库 `WJAnnie/investment-assistant-private`
-已创建但为空、Actions 已关闭；执行设备、数据分支和消费端权限尚未配置。公开旧引用已清理，
+已创建但为空、Actions 已关闭；执行设备、私有数据分支和消费端权限尚未配置。ChatGPT 任务页
+已存在四个公开研究提醒，但它们不代表私有仓库读取已授权。公开旧引用已清理，
 服务器悬空提交仍需 GitHub Support 处理。本文件是旧私有导出协议；它的固定 rule_version 8.1
 不等于五日观察的源码/配置 SHA256，不能拿它作为冻结版本证明。
 接入及验证边界见 [私有接入说明](chatgpt-github-automation.md)。
@@ -75,7 +76,7 @@ ChatGPT 报告应写"截至 14:30"，而不是"截至 14:34"。
 先确认授权的私有仓库及准确分支，再验证 manifest、current/latest 条目、目标快照的私有
 分类。目标为 `WJAnnie/investment-assistant-private`；该仓库当前没有快照或数据分支，
 上文只是结构示例，不是实际产物或启用私有 Actions 的声明。以下是消费端要求，不代表
-已经实现 ChatGPT 定时调用；连接器、运行上下文与通知均须独立联调。
+公开研究提醒任务已经启用；私有 GitHub 数据的自动调用、连接器运行上下文与通知仍须独立联调。
 manifest 的 `publishable` 只针对 current；若它与预期场景条目的 run_id/cutoff/哈希不一致，
 保持 WAIT，不能用另一个场景的可用状态背书本次数据。
 

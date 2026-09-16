@@ -10,7 +10,9 @@
 隔夜全球八标的公共观测已接入；行业、基本面及完整多周期来源仍未齐，整体仍为降级分析。
 账本已接入可选的私有观察，真实验收未开始。
 观察仅记录已知事实和失败，不认证数据/回执，也不因软件测试通过而宣布五日验收通过。
-此会话没有 ChatGPT Tasks 管理工具，没有创建自动提醒或验证 ChatGPT/设备收件。
+ChatGPT 任务页已核实四个投资助手提醒均已启用：Asia/Shanghai 周一至周五 09:00、
+11:30、14:30、16:10；它们执行公开研究和 WAIT 边界，不读取真实账户。私有 GitHub 消费
+和设备收件仍需独立验证。
 详见[当前实施记录](docs/live-completion-and-privacy-plan.md)和[验收契约](docs/live-acceptance-contract.md)。
 
 ## 项目定位
@@ -117,8 +119,8 @@ python -m compileall -q app tests
 不得为了绕过额度限制在公开 runner 注入真实持仓。Secrets 加密保存不保护程序输出、
 公开日志或计算后的衍生结果。公开测试说明见[运行手册](docs/public-github-trial.md)。
 
-私有 Windows 必须在运行窗口持续开机联网。ChatGPT Tasks/私有数据授权与设备收件
-尚未打通；飞书 API 接受消息不能作为 ChatGPT 已读或用户设备显示的证明。
+私有 Windows 必须在运行窗口持续开机联网。ChatGPT 公开研究提醒已启用；私有数据授权、
+GitHub 消费和设备收件仍未证明。飞书 API 接受消息不能作为 ChatGPT 已读或用户设备显示的证明。
 接入边界见[私有接入说明](docs/chatgpt-github-automation.md)。
 
 命令退出码为 `0` 表示全部标的完成，`1` 表示至少一个标的失败。批量结果会保留每个

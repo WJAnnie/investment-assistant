@@ -1,6 +1,8 @@
-# 私有 GitHub 数据 → ChatGPT 接入（尚未上线）
+# 私有 GitHub 数据 → ChatGPT 接入（私有数据链路尚未上线）
 
-状态：2026-09-15。完整账户数据必须私有；公开入口保护已部署，真实账户分析尚未上线。
+状态：2026-09-16。完整账户数据必须私有；公开入口保护已部署，真实账户分析尚未上线。
+ChatGPT 任务页已核实四个投资助手公开研究提醒已启用：Asia/Shanghai 周一至周五
+09:00、11:30、14:30、16:10；这不等于私有 GitHub 数据已授权给 ChatGPT。
 当前 `WJAnnie/investment-assistant` 仍为公开仓库，不能作为下述完整账户快照的发布目标。
 已按授权创建 `WJAnnie/investment-assistant-private`：API 复核为 private、空仓库、
 Actions disabled；未上传工作树、账户或凭据，未创建数据分支或授权 ChatGPT。
@@ -29,9 +31,9 @@ self-hosted runner 的 Actions 使用免费，但需要自行提供设备，设�
 公开侧使用独立 `public_trial` 导出器，仅运行固定公共行情和合成账户；
 不能把现有账户 exporter 去掉标签后复用，合成运行不计入真实五日观察。
 
-GitHub 应用授权读取与 ChatGPT 定时任务是两项能力，不能相互推定。当前会话没有 ChatGPT
-定时任务管理工具；本轮也未取得支持“定时任务自动调用私有 GitHub 应用”的官方页面依据，
-因此此组合保持待验证状态，不宣称已经打通。必须在实际消费任务中取得读取与通知回执。
+GitHub 应用授权读取与 ChatGPT 定时任务是两项能力，不能相互推定。当前已观察到公开研究
+提醒任务存在并启用，但尚未证明任务能自动调用私有 GitHub 应用读取账户快照；该组合保持待
+验证状态。必须在实际私有消费任务中取得读取、分析和通知回执。
 GitHub PR 提交不是已验证的 ChatGPT 唤醒接口；本提示词也不会创建或唤醒任务。
 
 GitHub Actions cron 可能延迟，不能保证 09:00、11:30、14:30、16:10 准点提醒。固定时点
@@ -142,5 +144,6 @@ deploy key；日志、错误文本、缓存和 artifacts 都在公开边界内�
 服务器残留仍需单独处置。公开历史的已执行清理见[实施记录](live-completion-and-privacy-plan.md)。
 私有 `--live-ledger` 已接入四阶段观察，init/status/record-receipt CLI 已具备；
 它不补齐完整来源、自动事前预测或人工审查，observer 仍保持 data_complete=false。
-没有创建真实账本、ChatGPT 任务或私有常驻进程，也没有完成上述线上联调。
+没有创建真实账本或私有常驻进程，也没有完成私有 GitHub → ChatGPT 线上联调；公开研究
+提醒任务已启用，但不计入真实五日验收。
 接线语义和失败处理见[观察账本契约](live-acceptance-contract.md)。
