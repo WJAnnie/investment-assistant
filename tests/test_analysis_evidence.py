@@ -197,19 +197,32 @@ class EvidenceStampValidationTests(unittest.TestCase):
 
 
 class GateEvidenceTests(unittest.TestCase):
+    def test_complete_data_does_not_pass_when_domain_criterion_fails(self):
+        gate = GateEvidence(
+            "fundamental", _valid_stamp(), complete=True, criterion_passed=False,
+        )
+        self.assertFalse(gate.passed)
+
     def test_requires_strict_bool_for_complete(self):
         ready_stamp = _valid_stamp()
         for invalid_bool in ("True", "False", 1, 0, None, [], {}):
             with self.subTest(complete=invalid_bool):
                 with self.assertRaises(TypeError):
-                    GateEvidence(name="industry", stamp=ready_stamp, complete=invalid_bool)  # type: ignore[arg-type]
+                    GateEvidence(name="industry", stamp=ready_stamp, complete=invalid_bool,
+                                 criterion_passed=True)  # type: ignore[arg-type]
+        for invalid_bool in ("True", "False", 1, 0, None, [], {}):
+            with self.subTest(criterion_passed=invalid_bool):
+                with self.assertRaises(TypeError):
+                    GateEvidence(name="industry", stamp=ready_stamp, complete=True,
+                                 criterion_passed=invalid_bool)  # type: ignore[arg-type]
 
     def test_rejects_invalid_name_or_stamp(self):
         ready_stamp = _valid_stamp()
         with self.assertRaises(ValueError):
-            GateEvidence(name="", stamp=ready_stamp, complete=True)
+            GateEvidence(name="", stamp=ready_stamp, complete=True, criterion_passed=True)
         with self.assertRaises(TypeError):
-            GateEvidence(name="industry", stamp="not_a_stamp", complete=True)  # type: ignore[arg-type]
+            GateEvidence(name="industry", stamp="not_a_stamp", complete=True,
+                         criterion_passed=True)  # type: ignore[arg-type]
 
     def test_passed_only_when_ready_complete_recent_or_delayed_and_no_reason(self):
         recent_stamp = _valid_stamp(status=EvidenceStatus.READY, freshness=Freshness.RECENT)
@@ -225,14 +238,14 @@ class GateEvidenceTests(unittest.TestCase):
             reason_code="DATA_MISSING",
         )
 
-        self.assertTrue(GateEvidence("industry", recent_stamp, True).passed)
-        self.assertTrue(GateEvidence("industry", delayed_stamp, True).passed)
-        self.assertFalse(GateEvidence("industry", recent_stamp, False).passed)
-        self.assertFalse(GateEvidence("industry", degraded_stamp, True).passed)
-        self.assertFalse(GateEvidence("industry", not_ready_stamp, True).passed)
+        self.assertTrue(GateEvidence("industry", recent_stamp, True, True).passed)
+        self.assertTrue(GateEvidence("industry", delayed_stamp, True, True).passed)
+        self.assertFalse(GateEvidence("industry", recent_stamp, False, True).passed)
+        self.assertFalse(GateEvidence("industry", degraded_stamp, True, True).passed)
+        self.assertFalse(GateEvidence("industry", not_ready_stamp, True, True).passed)
 
     def test_gate_evidence_is_frozen_immutable(self):
-        gate = GateEvidence("industry", _valid_stamp(), True)
+        gate = GateEvidence("industry", _valid_stamp(), True, True)
         with self.assertRaises(FrozenInstanceError):
             gate.complete = False  # type: ignore[misc]
 
@@ -241,14 +254,16 @@ class AnalysisEvidenceBundleTests(unittest.TestCase):
     def _make_gate(self, name: str, passed: bool, reason_code: str | None = None) -> GateEvidence:
         if passed:
             stamp = _valid_stamp(status=EvidenceStatus.READY, freshness=Freshness.RECENT)
-            return GateEvidence(name=name, stamp=stamp, complete=True)
+            return GateEvidence(name=name, stamp=stamp, complete=True,
+                                criterion_passed=True)
         code = reason_code or "DATA_MISSING"
         stamp = _valid_stamp(
             status=EvidenceStatus.NOT_READY,
             freshness=Freshness.RECENT,
             reason_code=code,
         )
-        return GateEvidence(name=name, stamp=stamp, complete=False)
+        return GateEvidence(name=name, stamp=stamp, complete=False,
+                            criterion_passed=False)
 
     def test_ready_only_when_all_four_passed(self):
         all_passed = AnalysisEvidenceBundle(
@@ -272,7 +287,8 @@ class AnalysisEvidenceBundleTests(unittest.TestCase):
 
     def test_bundle_blocked_by_handles_incomplete_stamp_without_reason(self):
         ready_stamp = _valid_stamp(status=EvidenceStatus.READY, freshness=Freshness.RECENT)
-        incomplete_gate = GateEvidence(name="structure", stamp=ready_stamp, complete=False)
+        incomplete_gate = GateEvidence(name="structure", stamp=ready_stamp, complete=False,
+                                       criterion_passed=True)
         bundle = AnalysisEvidenceBundle(
             industry=self._make_gate("industry", True),
             fundamental=self._make_gate("fundamental", True),
@@ -310,7 +326,8 @@ class AnalysisEvidenceBundleTests(unittest.TestCase):
 class EvaluateGatesInteropTests(unittest.TestCase):
     def test_gate_evidence_passed_read_by_evaluate_gates(self):
         ready_stamp = _valid_stamp(status=EvidenceStatus.READY, freshness=Freshness.RECENT)
-        passed_gate = GateEvidence(name="fundamental", stamp=ready_stamp, complete=True)
+        passed_gate = GateEvidence(name="fundamental", stamp=ready_stamp, complete=True,
+                                   criterion_passed=True)
 
         gates = {**ALL_GATES, "fundamental": passed_gate}
         result = evaluate_gates(gates)
@@ -323,7 +340,8 @@ class EvaluateGatesInteropTests(unittest.TestCase):
             freshness=Freshness.RECENT,
             reason_code="DATA_STALE",
         )
-        failed_gate = GateEvidence(name="fundamental", stamp=failed_stamp, complete=True)
+        failed_gate = GateEvidence(name="fundamental", stamp=failed_stamp, complete=True,
+                                   criterion_passed=True)
 
         gates = {**ALL_GATES, "fundamental": failed_gate}
         result = evaluate_gates(gates)

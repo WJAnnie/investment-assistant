@@ -136,6 +136,7 @@ class GateEvidence:
     name: str
     stamp: EvidenceStamp
     complete: bool
+    criterion_passed: bool
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -144,12 +145,15 @@ class GateEvidence:
             raise TypeError("stamp must be an EvidenceStamp instance")
         if type(self.complete) is not bool:
             raise TypeError("complete must be a strict bool (True or False)")
+        if type(self.criterion_passed) is not bool:
+            raise TypeError("criterion_passed must be a strict bool (True or False)")
 
     @property
     def passed(self) -> bool:
         return (
             self.stamp.status == EvidenceStatus.READY
             and self.complete is True
+            and self.criterion_passed is True
             and self.stamp.freshness in (Freshness.RECENT, Freshness.DELAYED)
             and self.stamp.reason_code is None
         )
