@@ -1065,6 +1065,47 @@ class IndustryRankingResultValidationTests(unittest.TestCase):
         self.assertEqual(res.stamp.status, EvidenceStatus.DEGRADED)
 
 
+class IndustryRankingFloatNarrowingRegressionTests(unittest.TestCase):
+    def test_ranking_float_narrowing_tie_break_regression(self):
+        t = _aware_dt(2026, 9, 16, 9, 30)
+        observations = [
+            IndustryObservation(
+                code=f"BK{i:04d}",
+                name=f"行业{i}",
+                as_of=t,
+                fetched_at=t + timedelta(minutes=1),
+                source="eastmoney",
+                return_1d_pct=i % 17,
+                return_5d_pct=i % 19,
+                return_20d_pct=i % 23,
+                turnover_rate=(i % 13) + 1,
+                advancers=(i % 10) + 1,
+                decliners=((i + 3) % 10) + 1,
+            )
+            for i in range(495)
+        ]
+        policy = IndustryRankingPolicy(
+            weight_1d=0.30,
+            weight_5d=0.25,
+            weight_20d=0.20,
+            weight_breadth=0.15,
+            weight_activity=0.10,
+            min_coverage=8,
+            max_age_hours=96,
+            min_score=60,
+        )
+        cutoff = t + timedelta(hours=1)
+        result = rank_industries(observations, cutoff, policy)
+        self.assertEqual(len(result.items), len(observations))
+        for i in range(len(result.items) - 1):
+            prev_it = result.items[i]
+            next_it = result.items[i + 1]
+            self.assertGreaterEqual(prev_it.score, next_it.score)
+            if prev_it.score == next_it.score:
+                self.assertLess(prev_it.code, next_it.code)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

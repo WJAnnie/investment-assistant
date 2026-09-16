@@ -465,7 +465,7 @@ def rank_industries(
     w_breadth = _to_decimal(policy.weight_breadth)
     w_activity = _to_decimal(policy.weight_activity)
 
-    scored_obs: list[tuple[Decimal, IndustryObservation]] = []
+    scored_obs: list[tuple[float, IndustryObservation]] = []
     for i, obs in enumerate(obs_list):
         score_dec = (
             w_1d * pcts_1d[i]
@@ -474,7 +474,8 @@ def rank_industries(
             + w_breadth * pcts_breadth[i]
             + w_activity * pcts_activity[i]
         )
-        scored_obs.append((score_dec, obs))
+        score_value = float(score_dec)
+        scored_obs.append((score_value, obs))
 
     # Sort descending by score, code ascending as stable secondary key
     ranked_entries = sorted(scored_obs, key=lambda x: (-x[0], x[1].code))
@@ -484,10 +485,10 @@ def rank_industries(
             code=obs.code,
             name=obs.name,
             rank=rank,
-            score=float(score_dec),
+            score=score_value,
             observation=obs,
         )
-        for rank, (score_dec, obs) in enumerate(ranked_entries, start=1)
+        for rank, (score_value, obs) in enumerate(ranked_entries, start=1)
     ]
 
     sample_as_of = obs_list[0].as_of
