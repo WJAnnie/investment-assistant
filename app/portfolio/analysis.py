@@ -4,6 +4,7 @@ Valuation and historical analysis are separate paths: an unavailable K-line
 source must not produce a made-up technical conclusion or block valuation.
 """
 
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
 from math import isfinite
 from zoneinfo import ZoneInfo
@@ -14,12 +15,14 @@ from app.analysis.macd import calculate_macd
 from app.analysis.rsi import calculate_rsi
 from app.analysis.technical_score import calculate_technical_score
 from app.analysis.trend import trend_score
+from app.chan.models import KLine
 from app.chan.pipeline import analyze_chan
 from app.decision.engine import build_decision
+from app.domain.bars import BarStatus
 from app.domain.timeframe import Timeframe
 from app.market.minute.context import load_minute_context
 from app.portfolio.structure import build_structure_evidence
-from app.portfolio.structure_inputs import cycle_from_dated_lines
+from app.portfolio.structure_inputs import cycle_from_dated_lines, cycle_from_minute_bars
 
 
 DEFAULT_MIN_HISTORY_BARS = 30
@@ -60,11 +63,15 @@ def analyze_portfolio(
     }
     cache = {}
     items = []
+    minute_cycles_assembled = 0
 
     for account in config.accounts:
         for holding in account.holdings:
             cache_key = _holding_cache_key(holding)
             if cache_key not in cache:
+                minute = load_minute_context(
+                    holding, snapshot_loader=minute_snapshot_loader, now=current_time,
+                )
                 cache[cache_key] = _load_historical_analysis(
                     holding,
                     history_loader,
@@ -72,9 +79,7 @@ def analyze_portfolio(
                     min_history_bars,
                     chan_min_span,
                     current_time,
-                )
-                minute = load_minute_context(
-                    holding, snapshot_loader=minute_snapshot_loader, now=current_time,
+                    minute_context=minute,
                 )
                 cache[cache_key]["minute_context"] = minute
                 cache[cache_key]["next_trigger"] = minute["next_trigger"]
@@ -84,6 +89,8 @@ def analyze_portfolio(
                         **minute["bar_status"],
                     }
             item = dict(cache[cache_key])
+            if item.get("_minute_cycles_count", 0) > 0:
+                minute_cycles_assembled += item["_minute_cycles_count"]
             item["account_id"] = account.account_id
             item["code"] = holding.code
             snapshot_item = snapshot_items.get((account.account_id, holding.code))
@@ -96,6 +103,9 @@ def analyze_portfolio(
                 )
             items.append(item)
 
+    for item in items:
+        item.pop("_minute_cycles_count", None)
+
     benchmark = None
     if history_loader is not None:
         benchmark = _load_benchmark_analysis(
@@ -105,6 +115,8 @@ def analyze_portfolio(
             chan_min_span,
             current_time,
         )
+        if isinstance(benchmark, dict):
+            benchmark.pop("_minute_cycles_count", None)
 
     ready_count = sum(item["status"] == "ready" for item in items)
     minute_ready = sum(item["minute_context"]["status"] == "ready" for item in items)
@@ -126,7 +138,7 @@ def analyze_portfolio(
             "industry": "configured_labels_only",
             "news": "unavailable",
             "minute": "closure_evidence_only" if items and minute_ready == len(items) else "unavailable",
-            "structure": "dated_cycles_only",
+            "structure": "dated_and_minute_cycles" if minute_cycles_assembled > 0 else "dated_cycles_only",
         },
         "data_cutoff": _market_now(current_time).isoformat(),
     }
@@ -158,6 +170,7 @@ def _load_historical_analysis(
     min_history_bars,
     chan_min_span,
     current_time,
+    minute_context=None,
 ):
     if history_loader is None:
         return _unavailable("历史K线接口未配置")
@@ -213,6 +226,7 @@ def _load_historical_analysis(
             lines,
             current_time,
             trend["direction"] == "UP",
+            minute_context=minute_context,
         )
         chan = analyze_chan(
             lines,
@@ -243,6 +257,18 @@ def _load_historical_analysis(
         }
         if structure is not None
         else None
+    )
+
+    minute_tfs = {
+        Timeframe.MIN_120,
+        Timeframe.MIN_30,
+        Timeframe.MIN_15,
+        Timeframe.MIN_5,
+    }
+    minute_cycles_count = (
+        sum(1 for ev in structure.confirm.per_cycle if ev.timeframe in minute_tfs)
+        if structure is not None
+        else 0
     )
 
     signal = chan["signal"]
@@ -282,6 +308,7 @@ def _load_historical_analysis(
         "signal": signal.value,
         "decision": _decision_summary(signal.value, technical["score"]),
         "structure": structure_payload,
+        "_minute_cycles_count": minute_cycles_count,
     }
 
 
@@ -337,7 +364,9 @@ def _decision_summary(signal, technical_score, current_position=0.0, risk_blocke
     }
 
 
-def _structure_evidence(code, market, period, lines, cutoff, trend_confirm):
+def _structure_evidence(
+    code, market, period, lines, cutoff, trend_confirm, minute_context=None
+):
     if not isinstance(cutoff, datetime) or cutoff.tzinfo is None or cutoff.utcoffset() is None:
         raise ValueError("cutoff must be timezone-aware datetime")
     if not isinstance(lines, (list, tuple)) or not lines:
@@ -357,6 +386,39 @@ def _structure_evidence(code, market, period, lines, cutoff, trend_confirm):
 
     if not cycles:
         return None
+
+    if isinstance(minute_context, Mapping):
+        minute_cycles = minute_context.get("cycles")
+        if isinstance(minute_cycles, Mapping):
+            minute_tfs = (
+                Timeframe.MIN_120,
+                Timeframe.MIN_30,
+                Timeframe.MIN_15,
+                Timeframe.MIN_5,
+            )
+            for tf in minute_tfs:
+                try:
+                    c_info = minute_cycles.get(tf.value)
+                    if not isinstance(c_info, Mapping):
+                        continue
+                    closed_lines = c_info.get("closed_lines")
+                    if not isinstance(closed_lines, (list, tuple)) or not closed_lines:
+                        continue
+                    if not all(isinstance(bar, KLine) for bar in closed_lines):
+                        continue
+                    raw_status = c_info.get("status")
+                    if isinstance(raw_status, BarStatus):
+                        status_enum = raw_status
+                    elif isinstance(raw_status, str):
+                        status_enum = BarStatus(raw_status)
+                    else:
+                        continue
+                    min_cycle = cycle_from_minute_bars(
+                        tf, closed_lines, status=status_enum, source="minute_context"
+                    )
+                    cycles[tf] = min_cycle
+                except Exception:
+                    continue
 
     return build_structure_evidence(
         code=code,

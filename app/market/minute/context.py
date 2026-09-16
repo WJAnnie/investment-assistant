@@ -127,6 +127,10 @@ def _cycle_summary(bars, selected, now):
         state = BarStatus.INVALID
     elif missing:
         state = BarStatus.MISSING
+    closed_lines = tuple(
+        bar.line for bar in started
+        if bar.status is BarStatus.CLOSED and bar.line is not None
+    )
     return {
         "status": state.value,
         "current_status": selected.status.value if selected else BarStatus.MISSING.value,
@@ -137,6 +141,7 @@ def _cycle_summary(bars, selected, now):
         "expected": selected.expected if selected else 0,
         "missing_buckets": missing,
         "invalid_buckets": invalid,
+        "closed_lines": closed_lines,
     }
 
 
