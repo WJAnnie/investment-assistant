@@ -1,5 +1,6 @@
 """Deterministic, offline renderers for scheduled portfolio reports."""
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
 
@@ -339,16 +340,83 @@ def _format_analysis_item(item):
 
 
 def _format_decision_evidence(item):
-    item = item or {}
-    daily = "历史技术已计算，结构待复核" if item.get("status") == "ready" else "未就绪"
-    states = (item.get("minute_context") or {}).get("bar_status") or {}
-    labels = {"closed": "已闭合；结构未确认", "forming": "形成中，不参与确认",
-              "missing": "缺失", "invalid": "无效", "stale": "陈旧"}
-    lines = ["多周期证据：周线 未就绪；日线 " + daily]
-    lines.append("；".join(f"{label} {labels.get(states.get(cycle), '未就绪')}"
-                           for cycle, label in (("120m", "120分钟"), ("30m", "30分钟"), ("5m", "5分钟"))))
-    lines.append("完整分析：未就绪；动作 WAIT；建议仓位变化 +0%。补齐来源与风险证据后人工复核。")
-    return "\n".join(lines)
+    """Render the decision evidence block for one holding.
+
+    Every cycle is read from the upstream structure payload, which is itself
+    fail-closed. An absent or unparsable payload degrades every cycle to
+    未就绪 rather than assuming a closed bar, and no branch may upgrade a
+    cycle into a buy condition: the action line stays a fixed WAIT because
+    complete analysis is not reachable yet.
+    """
+    item = item if isinstance(item, Mapping) else {}
+    structure = item.get("structure")
+    return "\n".join(
+        (
+            "多周期证据（缠论结构）：" + _cycle_evidence_text(structure),
+            _structure_conclusion_text(structure),
+            "完整分析：未就绪；动作 WAIT；建议仓位变化 +0%。补齐来源与风险证据后人工复核。",
+        )
+    )
+
+
+_CYCLE_EVIDENCE_ORDER = (
+    ("weekly", "周线"),
+    ("daily", "日线"),
+    ("120m", "120分钟"),
+    ("30m", "30分钟"),
+    ("15m", "15分钟"),
+    ("5m", "5分钟"),
+)
+
+_CYCLE_EVIDENCE_TEXT = {
+    "closed": "已闭合，结构待确认",
+    "forming": "形成中，不参与确认",
+    "missing": "缺失",
+    "invalid": "无效",
+    "stale": "陈旧，不参与确认",
+}
+
+_CYCLE_LABEL_BY_VALUE = {value: label for value, label in _CYCLE_EVIDENCE_ORDER}
+
+_STRUCTURE_OUTCOME_TEXT = {
+    "CONFIRMED": "结构已确认，仍需本人复核后再决定是否执行",
+    "PRECONFIRM": "前置确认中，等闭合周期补齐",
+}
+
+_STRUCTURE_REASON_TEXT = {
+    "STRUCTURE_DATA_MISSING": "必需周期数据缺失",
+    "STRUCTURE_INCOMPLETE": "周期数据不完整",
+    "UNCONFIRMED_STRUCTURE": "结构信号未确认",
+}
+
+
+def _cycle_evidence_text(structure):
+    """Describe closedness per cycle; unknown values never become 'closed'."""
+    statuses = structure.get("per_cycle_status") if isinstance(structure, Mapping) else None
+    if not isinstance(statuses, Mapping):
+        return "；".join(f"{label} 未就绪" for _, label in _CYCLE_EVIDENCE_ORDER)
+    return "；".join(
+        f"{label} {_CYCLE_EVIDENCE_TEXT.get(statuses.get(value), '未就绪')}"
+        for value, label in _CYCLE_EVIDENCE_ORDER
+    )
+
+
+def _structure_conclusion_text(structure):
+    """Summarize the structure gate without promoting the blocked action."""
+    if not isinstance(structure, Mapping):
+        return "结构结论：未就绪；缺少已验证的多周期结构证据，不生成买入条件。"
+    outcome = _STRUCTURE_OUTCOME_TEXT.get(
+        structure.get("outcome"), "等待，证据不足不生成买入条件"
+    )
+    blockers = []
+    for value in structure.get("blocked_by") or ():
+        label = "核心信号" if value == "core_signal" else _CYCLE_LABEL_BY_VALUE.get(value)
+        if label is not None and label not in blockers:
+            blockers.append(label)
+    detail = "、".join(blockers) or _STRUCTURE_REASON_TEXT.get(structure.get("reason_code"))
+    if detail:
+        return f"结构结论：{outcome}；待补齐：{detail}。"
+    return f"结构结论：{outcome}。"
 
 
 def _format_minute_context(item):
