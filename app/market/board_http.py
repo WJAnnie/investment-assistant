@@ -12,6 +12,7 @@ import math
 import re
 from types import MappingProxyType
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.market.global_markets import (
     ERROR_MALFORMED,
@@ -27,6 +28,9 @@ _KLINE_BASE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 
 _DATE_HYPHEN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_COMPACT_RE = re.compile(r"^\d{8}$")
+_EPOCH_DIGIT_RE = re.compile(r"^\d+$")
+
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 class RecordList(list):
@@ -76,6 +80,32 @@ def _parse_integer_count(val: Any) -> int | None:
     if not math.isfinite(f) or not f.is_integer():
         return None
     return int(f)
+
+
+def _parse_epoch_seconds(val: Any) -> int | None:
+    if val is None or type(val) is bool:
+        return None
+    try:
+        if isinstance(val, str):
+            s = val.strip()
+            if not _EPOCH_DIGIT_RE.match(s):
+                return None
+            ts = int(s)
+        elif isinstance(val, int):
+            ts = val
+        elif isinstance(val, float):
+            if not math.isfinite(val) or not val.is_integer():
+                return None
+            if not (1_000_000_000 <= val <= 4_000_000_000):
+                return None
+            ts = int(val)
+        else:
+            return None
+        if not (1_000_000_000 <= ts <= 4_000_000_000):
+            return None
+        return ts
+    except (ValueError, OverflowError, TypeError):
+        return None
 
 
 def _normalize_date(val: Any) -> str | None:
@@ -128,7 +158,7 @@ class EastMoneyBoardClient(_BoundedHttpProvider):
         for page in range(1, _MAX_PAGES + 1):
             url = (
                 f"{_LIST_BASE_URL}?pn={page}&pz=100&po=1&np=1&fltt=2&invt=2"
-                f"&fid=f3&fs=m:90+t:2&fields=f12,f14,f3,f8,f104,f105,f109,f110"
+                f"&fid=f3&fs=m:90+t:2&fields=f12,f14,f3,f8,f104,f105,f109,f110,f124"
             )
             raw_bytes = self._get(url, None)
             payload = _decode_json(raw_bytes)
@@ -195,6 +225,15 @@ class EastMoneyBoardClient(_BoundedHttpProvider):
                 if ret_20d is None:
                     continue
 
+                data_time = _parse_epoch_seconds(row.get("f124"))
+                if data_time is None:
+                    continue
+
+                try:
+                    iso_time = datetime.fromtimestamp(data_time, SHANGHAI_TZ).isoformat()
+                except (OverflowError, OSError, ValueError):
+                    continue
+
                 seen_codes.add(code)
                 records.append({
                     "板块代码": code,
@@ -205,6 +244,7 @@ class EastMoneyBoardClient(_BoundedHttpProvider):
                     "下跌家数": decliners,
                     "近5日涨跌幅": ret_5d,
                     "近20日涨跌幅": ret_20d,
+                    "数据时间": iso_time,
                 })
 
         return RecordList(records)

@@ -74,6 +74,9 @@ class FakeSession:
         return FakeResponse(self.body, self.status_code)
 
 
+F124 = 1789544372
+EXPECTED_ISO_TIME = "2026-09-16T15:39:32+08:00"
+
 EXPECTED_BOARD_KEYS = {
     "板块代码",
     "板块名称",
@@ -83,6 +86,7 @@ EXPECTED_BOARD_KEYS = {
     "下跌家数",
     "近5日涨跌幅",
     "近20日涨跌幅",
+    "数据时间",
 }
 
 EXPECTED_KLINE_KEYS = {
@@ -106,6 +110,7 @@ def test_list_normal_diff_as_list():
                     "f105": 15,
                     "f109": 1.25,
                     "f110": 4.56,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0476",
@@ -116,6 +121,7 @@ def test_list_normal_diff_as_list():
                     "f105": 60,
                     "f109": -0.50,
                     "f110": 2.10,
+                    "f124": F124,
                 },
             ],
         },
@@ -145,6 +151,7 @@ def test_list_normal_diff_as_list():
     assert row0["下跌家数"] == 15
     assert row0["近5日涨跌幅"] == 1.25
     assert row0["近20日涨跌幅"] == 4.56
+    assert row0["数据时间"] == EXPECTED_ISO_TIME
 
     # Check request headers and query string
     assert len(session.calls) == 2
@@ -154,7 +161,7 @@ def test_list_normal_diff_as_list():
     assert "pn=1" in call0["url"]
     assert "pz=100" in call0["url"]
     assert "fs=m:90+t:2" in call0["url"]
-    assert "fields=f12,f14,f3,f8,f104,f105,f109,f110" in call0["url"]
+    assert "fields=f12,f14,f3,f8,f104,f105,f109,f110,f124" in call0["url"]
     assert call0["headers"].get("Referer") == "https://quote.eastmoney.com/"
     assert call0["headers"].get("User-Agent") == "investment-assistant-public-trial/1.0"
 
@@ -177,6 +184,7 @@ def test_list_normal_diff_as_dict():
                     "f105": "15",
                     "f109": "1.25",
                     "f110": "4.56",
+                    "f124": F124,
                 }
             },
         },
@@ -197,6 +205,7 @@ def test_list_normal_diff_as_dict():
     assert records[0]["下跌家数"] == 15
     assert records[0]["近5日涨跌幅"] == 1.25
     assert records[0]["近20日涨跌幅"] == 4.56
+    assert records[0]["数据时间"] == EXPECTED_ISO_TIME
 
 
 def test_kline_normal():
@@ -255,6 +264,7 @@ def test_list_discard_missing_or_dash_counts():
                     "f105": 10,
                     "f109": 1.0,
                     "f110": 1.0,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0002",
@@ -265,6 +275,7 @@ def test_list_discard_missing_or_dash_counts():
                     "f105": None,
                     "f109": 1.0,
                     "f110": 1.0,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0003",
@@ -275,6 +286,7 @@ def test_list_discard_missing_or_dash_counts():
                     "f105": 10,
                     "f109": 1.0,
                     "f110": 1.0,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0004",
@@ -285,6 +297,7 @@ def test_list_discard_missing_or_dash_counts():
                     "f105": "-",
                     "f109": 1.0,
                     "f110": 1.0,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0005",
@@ -295,6 +308,7 @@ def test_list_discard_missing_or_dash_counts():
                     "f105": 15,
                     "f109": 2.5,
                     "f110": 3.5,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0006",
@@ -305,6 +319,7 @@ def test_list_discard_missing_or_dash_counts():
                     "f105": 10,
                     "f109": "-",
                     "f110": 1.0,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0007",
@@ -315,6 +330,7 @@ def test_list_discard_missing_or_dash_counts():
                     "f105": 10,
                     "f109": None,
                     "f110": 1.0,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0008",
@@ -325,6 +341,7 @@ def test_list_discard_missing_or_dash_counts():
                     "f105": 10,
                     "f109": 1.0,
                     "f110": "-",
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0009",
@@ -335,6 +352,7 @@ def test_list_discard_missing_or_dash_counts():
                     "f105": 10,
                     "f109": 1.0,
                     "f110": None,
+                    "f124": F124,
                 },
             ]
         },
@@ -348,6 +366,7 @@ def test_list_discard_missing_or_dash_counts():
     assert len(records) == 1
     assert records[0]["板块代码"] == "BK0005"
     assert records[0]["板块名称"] == "行业5"
+    assert records[0]["数据时间"] == EXPECTED_ISO_TIME
 
 
 def test_list_discard_missing_code_or_name():
@@ -355,13 +374,13 @@ def test_list_discard_missing_code_or_name():
         "rc": 0,
         "data": {
             "diff": [
-                {"f14": "无代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
-                {"f12": None, "f14": "空代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
-                {"f12": "  ", "f14": "空格代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
-                {"f12": "BK0001", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
-                {"f12": "BK0002", "f14": None, "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
-                {"f12": "BK0003", "f14": "   ", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
-                {"f12": "BK0004", "f14": "有效行业", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
+                {"f14": "无代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0, "f124": F124},
+                {"f12": None, "f14": "空代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0, "f124": F124},
+                {"f12": "  ", "f14": "空格代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0, "f124": F124},
+                {"f12": "BK0001", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0, "f124": F124},
+                {"f12": "BK0002", "f14": None, "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0, "f124": F124},
+                {"f12": "BK0003", "f14": "   ", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0, "f124": F124},
+                {"f12": "BK0004", "f14": "有效行业", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0, "f124": F124},
             ]
         },
     }
@@ -374,6 +393,7 @@ def test_list_discard_missing_code_or_name():
     assert len(records) == 1
     assert records[0]["板块代码"] == "BK0004"
     assert records[0]["板块名称"] == "有效行业"
+    assert records[0]["数据时间"] == EXPECTED_ISO_TIME
 
 
 def test_http_status_error_raises():
@@ -485,6 +505,7 @@ def test_akshare_industry_provider_duck_typing_integration():
                     "f105": 15,
                     "f109": 1.25,
                     "f110": 4.56,
+                    "f124": F124,
                 }
             ],
         },
@@ -580,6 +601,7 @@ def test_list_pagination():
                     "f105": 5,
                     "f109": 3.0,
                     "f110": 4.0,
+                    "f124": F124,
                 }
             ],
         },
@@ -600,6 +622,7 @@ def test_list_pagination():
     assert "pn=2" in session.calls[1]["url"]
     assert len(records) == 1
     assert records[0]["板块代码"] == "BK0001"
+    assert records[0]["数据时间"] == EXPECTED_ISO_TIME
 
 
 def test_list_max_pages_cap():
@@ -617,6 +640,7 @@ def test_list_max_pages_cap():
                     "f105": 10,
                     "f109": 1.0,
                     "f110": 1.0,
+                    "f124": F124,
                 }
             ],
         },
@@ -630,6 +654,7 @@ def test_list_max_pages_cap():
     assert "pn=1" in session.calls[0]["url"]
     assert "pn=8" in session.calls[7]["url"]
     assert len(records) == 1
+    assert records[0]["数据时间"] == EXPECTED_ISO_TIME
 
 
 def test_list_deduplication_by_board_code():
@@ -646,6 +671,7 @@ def test_list_deduplication_by_board_code():
                     "f105": 5,
                     "f109": 1.0,
                     "f110": 1.0,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0002",
@@ -656,6 +682,7 @@ def test_list_deduplication_by_board_code():
                     "f105": 10,
                     "f109": 2.0,
                     "f110": 2.0,
+                    "f124": F124,
                 },
             ]
         },
@@ -673,6 +700,7 @@ def test_list_deduplication_by_board_code():
                     "f105": 99,
                     "f109": 99.0,
                     "f110": 99.0,
+                    "f124": F124,
                 },
                 {
                     "f12": "BK0003",
@@ -683,6 +711,7 @@ def test_list_deduplication_by_board_code():
                     "f105": 15,
                     "f109": 3.0,
                     "f110": 3.0,
+                    "f124": F124,
                 },
             ]
         },
@@ -702,6 +731,7 @@ def test_list_deduplication_by_board_code():
     assert codes == ["BK0001", "BK0002", "BK0003"]
     assert records[1]["板块名称"] == "行业2-原版"
     assert records[1]["涨跌幅"] == 2.0
+    assert records[1]["数据时间"] == EXPECTED_ISO_TIME
 
 
 def test_list_request_url_host_is_push2delay():
@@ -714,3 +744,105 @@ def test_list_request_url_host_is_push2delay():
     recorded_url = session.calls[0]["url"]
     assert recorded_url.startswith("https://push2delay.eastmoney.com/api/qt/clist/get")
     assert "push2.eastmoney.com" not in recorded_url.replace("push2delay.eastmoney.com", "")
+
+
+@pytest.mark.parametrize(
+    "bad_f124,omit_key",
+    [
+        (None, True),
+        ("-", False),
+        ("", False),
+        (None, False),
+        (True, False),
+        (1e30, False),
+        ("abc", False),
+        (999999999, False),
+    ],
+)
+def test_list_discard_invalid_f124(bad_f124: Any, omit_key: bool):
+    row = {
+        "f12": "BK0001",
+        "f14": "行业1",
+        "f3": 1.0,
+        "f8": 1.0,
+        "f104": 10,
+        "f105": 10,
+        "f109": 1.0,
+        "f110": 1.0,
+    }
+    if not omit_key:
+        row["f124"] = bad_f124
+    payload = {"rc": 0, "data": {"diff": [row]}}
+    empty_payload = {"rc": 0, "data": {"diff": []}}
+    session = FakeSession(responses=[json.dumps(payload), json.dumps(empty_payload)])
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+    assert len(records) == 0
+
+
+def test_list_f124_formats_accepted():
+    payload = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": "1789544372",
+                },
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": 1789544372.0,
+                },
+            ]
+        },
+    }
+    empty_payload = {"rc": 0, "data": {"diff": []}}
+    session = FakeSession(responses=[json.dumps(payload), json.dumps(empty_payload)])
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+    assert len(records) == 2
+    assert records[0]["数据时间"] == EXPECTED_ISO_TIME
+    assert records[1]["数据时间"] == EXPECTED_ISO_TIME
+    assert records[0]["数据时间"] == records[1]["数据时间"]
+
+
+def test_list_f124_iso_shanghai_offset():
+    payload = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": F124,
+                }
+            ]
+        },
+    }
+    empty_payload = {"rc": 0, "data": {"diff": []}}
+    session = FakeSession(responses=[json.dumps(payload), json.dumps(empty_payload)])
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+    assert len(records) == 1
+    assert records[0]["数据时间"] == "2026-09-16T15:39:32+08:00"
+    assert records[0]["数据时间"].endswith("+08:00")
