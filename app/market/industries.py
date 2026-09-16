@@ -38,6 +38,8 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "turnover_rate": ("换手率", "换手率(%)", "turnover_rate", "turnover"),
     "advancers": ("上涨家数", "上涨", "advancers", "up"),
     "decliners": ("下跌家数", "下跌", "decliners", "down"),
+    "return_5d_pct": ("近5日涨跌幅", "5日涨跌幅", "return_5d_pct"),
+    "return_20d_pct": ("近20日涨跌幅", "20日涨跌幅", "return_20d_pct"),
     "time": ("日期", "时间", "date", "datetime", "time"),
     "close": ("收盘", "收盘价", "close", "price", "最新价"),
 }
@@ -342,80 +344,93 @@ class AkShareIndustryProvider:
                 errors[code] = ERROR_DATE_MISMATCH
                 continue
 
-            start_date_str = (market_date - timedelta(days=self._history_days)).strftime("%Y%m%d")
-            end_date_str = (market_date + timedelta(days=self._history_days)).strftime("%Y%m%d")
-            try:
-                hist_getter = getattr(client, "stock_board_industry_hist_em", None)
-                if hist_getter is None:
+            raw_5d = self._first(row, "return_5d_pct")
+            raw_20d = self._first(row, "return_20d_pct")
+            if raw_5d is None and raw_20d is None:
+                start_date_str = (market_date - timedelta(days=self._history_days)).strftime("%Y%m%d")
+                end_date_str = (market_date + timedelta(days=self._history_days)).strftime("%Y%m%d")
+                try:
+                    hist_getter = getattr(client, "stock_board_industry_hist_em", None)
+                    if hist_getter is None:
+                        errors[code] = ERROR_MALFORMED_RESPONSE
+                        continue
+                    df_hist = hist_getter(
+                        symbol=code,
+                        start_date=start_date_str,
+                        end_date=end_date_str,
+                        period="日k",
+                        adjust="",
+                    )
+                except (Exception, MemoryError) as exc:
+                    errors[code] = _classify_exception(exc)
+                    continue
+
+                if hasattr(df_hist, "to_dict"):
+                    k_rows = df_hist.to_dict(orient="records")
+                elif isinstance(df_hist, list):
+                    k_rows = df_hist
+                else:
                     errors[code] = ERROR_MALFORMED_RESPONSE
                     continue
-                df_hist = hist_getter(
-                    symbol=code,
-                    start_date=start_date_str,
-                    end_date=end_date_str,
-                    period="日k",
-                    adjust="",
-                )
-            except (Exception, MemoryError) as exc:
-                errors[code] = _classify_exception(exc)
-                continue
 
-            if hasattr(df_hist, "to_dict"):
-                k_rows = df_hist.to_dict(orient="records")
-            elif isinstance(df_hist, list):
-                k_rows = df_hist
+                if not k_rows:
+                    errors[code] = ERROR_NO_USABLE_DATA
+                    continue
+
+                parsed_klines: list[tuple[date, float]] = []
+                k_malformed = False
+                for k_row in k_rows:
+                    if not isinstance(k_row, Mapping):
+                        k_malformed = True
+                        break
+                    r_date = self._first(k_row, "time")
+                    r_close = self._first(k_row, "close")
+                    try:
+                        kd = _parse_date(r_date, "日期")
+                        kc = _parse_float(r_close, "收盘")
+                    except (TypeError, ValueError):
+                        k_malformed = True
+                        break
+                    parsed_klines.append((kd, kc))
+
+                if k_malformed:
+                    errors[code] = ERROR_MALFORMED_RESPONSE
+                    continue
+
+                parsed_klines.sort(key=lambda item: item[0])
+
+                if parsed_klines[-1][0] != market_date:
+                    errors[code] = ERROR_DATE_MISMATCH
+                    continue
+
+                if len(parsed_klines) < 21:
+                    errors[code] = ERROR_NO_USABLE_DATA
+                    continue
+
+                close_last = parsed_klines[-1][1]
+                close_5d = parsed_klines[-6][1]
+                close_20d = parsed_klines[-21][1]
+
+                if close_last <= 0 or close_5d <= 0 or close_20d <= 0:
+                    errors[code] = ERROR_NO_USABLE_DATA
+                    continue
+
+                ret_5d_pct = (close_last / close_5d - 1.0) * 100.0
+                ret_20d_pct = (close_last / close_20d - 1.0) * 100.0
+
+                if not (math.isfinite(ret_5d_pct) and math.isfinite(ret_20d_pct)):
+                    errors[code] = ERROR_MALFORMED_RESPONSE
+                    continue
             else:
-                errors[code] = ERROR_MALFORMED_RESPONSE
-                continue
-
-            if not k_rows:
-                errors[code] = ERROR_NO_USABLE_DATA
-                continue
-
-            parsed_klines: list[tuple[date, float]] = []
-            k_malformed = False
-            for k_row in k_rows:
-                if not isinstance(k_row, Mapping):
-                    k_malformed = True
-                    break
-                r_date = self._first(k_row, "time")
-                r_close = self._first(k_row, "close")
                 try:
-                    kd = _parse_date(r_date, "日期")
-                    kc = _parse_float(r_close, "收盘")
+                    ret_5d_pct = _parse_float(raw_5d, "return_5d_pct")
+                    ret_20d_pct = _parse_float(raw_20d, "return_20d_pct")
                 except (TypeError, ValueError):
-                    k_malformed = True
-                    break
-                parsed_klines.append((kd, kc))
-
-            if k_malformed:
-                errors[code] = ERROR_MALFORMED_RESPONSE
-                continue
-
-            parsed_klines.sort(key=lambda item: item[0])
-
-            if parsed_klines[-1][0] != market_date:
-                errors[code] = ERROR_DATE_MISMATCH
-                continue
-
-            if len(parsed_klines) < 21:
-                errors[code] = ERROR_NO_USABLE_DATA
-                continue
-
-            close_last = parsed_klines[-1][1]
-            close_5d = parsed_klines[-6][1]
-            close_20d = parsed_klines[-21][1]
-
-            if close_last <= 0 or close_5d <= 0 or close_20d <= 0:
-                errors[code] = ERROR_NO_USABLE_DATA
-                continue
-
-            ret_5d_pct = (close_last / close_5d - 1.0) * 100.0
-            ret_20d_pct = (close_last / close_20d - 1.0) * 100.0
-
-            if not (math.isfinite(ret_5d_pct) and math.isfinite(ret_20d_pct)):
-                errors[code] = ERROR_MALFORMED_RESPONSE
-                continue
+                    errors[code] = ERROR_MALFORMED_RESPONSE
+                    continue
+                if not (math.isfinite(ret_5d_pct) and math.isfinite(ret_20d_pct)):
+                    errors[code] = ERROR_MALFORMED_RESPONSE
+                    continue
 
             try:
                 obs = IndustryObservation(

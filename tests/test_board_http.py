@@ -48,13 +48,15 @@ class FakeSession:
 
     def __init__(
         self,
-        body: bytes | str = b"",
+        body: bytes | str | None = None,
         status_code: int = 200,
         error: Exception | None = None,
+        responses: list[Any] | None = None,
     ) -> None:
-        self.body = body
+        self.body = body if body is not None else b""
         self.status_code = status_code
         self.error = error
+        self.responses = list(responses) if responses is not None else None
         self.calls: list[dict[str, Any]] = []
         self.trust_env = True
 
@@ -62,6 +64,13 @@ class FakeSession:
         self.calls.append({"url": url, **kwargs})
         if self.error is not None:
             raise self.error
+        if self.responses is not None and len(self.responses) > 0:
+            resp = self.responses.pop(0)
+            if isinstance(resp, FakeResponse):
+                return resp
+            if isinstance(resp, tuple):
+                return FakeResponse(resp[0], resp[1])
+            return FakeResponse(resp, 200)
         return FakeResponse(self.body, self.status_code)
 
 
@@ -72,6 +81,8 @@ EXPECTED_BOARD_KEYS = {
     "换手率",
     "上涨家数",
     "下跌家数",
+    "近5日涨跌幅",
+    "近20日涨跌幅",
 }
 
 EXPECTED_KLINE_KEYS = {
@@ -93,6 +104,8 @@ def test_list_normal_diff_as_list():
                     "f8": 3.12,
                     "f104": 80,
                     "f105": 15,
+                    "f109": 1.25,
+                    "f110": 4.56,
                 },
                 {
                     "f12": "BK0476",
@@ -101,11 +114,14 @@ def test_list_normal_diff_as_list():
                     "f8": 2.45,
                     "f104": 40,
                     "f105": 60,
+                    "f109": -0.50,
+                    "f110": 2.10,
                 },
             ],
         },
     }
-    session = FakeSession(json.dumps(payload))
+    empty_payload = {"rc": 0, "data": {"diff": []}}
+    session = FakeSession(responses=[json.dumps(payload), json.dumps(empty_payload)])
     client = EastMoneyBoardClient(session=session)
     result = client.stock_board_industry_name_em()
 
@@ -127,14 +143,23 @@ def test_list_normal_diff_as_list():
     assert row0["换手率"] == 3.12
     assert row0["上涨家数"] == 80
     assert row0["下跌家数"] == 15
+    assert row0["近5日涨跌幅"] == 1.25
+    assert row0["近20日涨跌幅"] == 4.56
 
     # Check request headers and query string
-    assert len(session.calls) == 1
-    call = session.calls[0]
-    assert call["params"] is None
-    assert "fs=m:90+t:2" in call["url"]
-    assert call["headers"].get("Referer") == "https://quote.eastmoney.com/"
-    assert call["headers"].get("User-Agent") == "investment-assistant-public-trial/1.0"
+    assert len(session.calls) == 2
+    call0 = session.calls[0]
+    assert call0["params"] is None
+    assert "push2delay.eastmoney.com" in call0["url"]
+    assert "pn=1" in call0["url"]
+    assert "pz=100" in call0["url"]
+    assert "fs=m:90+t:2" in call0["url"]
+    assert "fields=f12,f14,f3,f8,f104,f105,f109,f110" in call0["url"]
+    assert call0["headers"].get("Referer") == "https://quote.eastmoney.com/"
+    assert call0["headers"].get("User-Agent") == "investment-assistant-public-trial/1.0"
+
+    call1 = session.calls[1]
+    assert "pn=2" in call1["url"]
 
 
 def test_list_normal_diff_as_dict():
@@ -150,11 +175,14 @@ def test_list_normal_diff_as_dict():
                     "f8": "3.12",
                     "f104": "80",
                     "f105": "15",
+                    "f109": "1.25",
+                    "f110": "4.56",
                 }
             },
         },
     }
-    session = FakeSession(json.dumps(payload))
+    empty_payload = {"rc": 0, "data": {"diff": []}}
+    session = FakeSession(responses=[json.dumps(payload), json.dumps(empty_payload)])
     client = EastMoneyBoardClient(session=session)
     result = client.stock_board_industry_name_em()
 
@@ -167,6 +195,8 @@ def test_list_normal_diff_as_dict():
     assert records[0]["换手率"] == 3.12
     assert records[0]["上涨家数"] == 80
     assert records[0]["下跌家数"] == 15
+    assert records[0]["近5日涨跌幅"] == 1.25
+    assert records[0]["近20日涨跌幅"] == 4.56
 
 
 def test_kline_normal():
@@ -223,6 +253,8 @@ def test_list_discard_missing_or_dash_counts():
                     "f8": 1.0,
                     "f104": "-",
                     "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
                 },
                 {
                     "f12": "BK0002",
@@ -231,6 +263,8 @@ def test_list_discard_missing_or_dash_counts():
                     "f8": 1.0,
                     "f104": 20,
                     "f105": None,
+                    "f109": 1.0,
+                    "f110": 1.0,
                 },
                 {
                     "f12": "BK0003",
@@ -239,6 +273,8 @@ def test_list_discard_missing_or_dash_counts():
                     "f8": 1.0,
                     "f104": "",
                     "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
                 },
                 {
                     "f12": "BK0004",
@@ -247,6 +283,8 @@ def test_list_discard_missing_or_dash_counts():
                     "f8": 1.0,
                     "f104": 20,
                     "f105": "-",
+                    "f109": 1.0,
+                    "f110": 1.0,
                 },
                 {
                     "f12": "BK0005",
@@ -255,11 +293,54 @@ def test_list_discard_missing_or_dash_counts():
                     "f8": 1.5,
                     "f104": 30,
                     "f105": 15,
+                    "f109": 2.5,
+                    "f110": 3.5,
+                },
+                {
+                    "f12": "BK0006",
+                    "f14": "行业6",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": "-",
+                    "f110": 1.0,
+                },
+                {
+                    "f12": "BK0007",
+                    "f14": "行业7",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": None,
+                    "f110": 1.0,
+                },
+                {
+                    "f12": "BK0008",
+                    "f14": "行业8",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": "-",
+                },
+                {
+                    "f12": "BK0009",
+                    "f14": "行业9",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": None,
                 },
             ]
         },
     }
-    session = FakeSession(json.dumps(payload))
+    empty_payload = {"rc": 0, "data": {"diff": []}}
+    session = FakeSession(responses=[json.dumps(payload), json.dumps(empty_payload)])
     client = EastMoneyBoardClient(session=session)
     result = client.stock_board_industry_name_em()
     records = result.to_dict(orient="records")
@@ -274,17 +355,18 @@ def test_list_discard_missing_code_or_name():
         "rc": 0,
         "data": {
             "diff": [
-                {"f14": "无代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10},
-                {"f12": None, "f14": "空代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10},
-                {"f12": "  ", "f14": "空格代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10},
-                {"f12": "BK0001", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10},
-                {"f12": "BK0002", "f14": None, "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10},
-                {"f12": "BK0003", "f14": "   ", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10},
-                {"f12": "BK0004", "f14": "有效行业", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10},
+                {"f14": "无代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
+                {"f12": None, "f14": "空代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
+                {"f12": "  ", "f14": "空格代码", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
+                {"f12": "BK0001", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
+                {"f12": "BK0002", "f14": None, "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
+                {"f12": "BK0003", "f14": "   ", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
+                {"f12": "BK0004", "f14": "有效行业", "f3": 1.0, "f8": 1.0, "f104": 10, "f105": 10, "f109": 1.0, "f110": 1.0},
             ]
         },
     }
-    session = FakeSession(json.dumps(payload))
+    empty_payload = {"rc": 0, "data": {"diff": []}}
+    session = FakeSession(responses=[json.dumps(payload), json.dumps(empty_payload)])
     client = EastMoneyBoardClient(session=session)
     result = client.stock_board_industry_name_em()
     records = result.to_dict(orient="records")
@@ -401,6 +483,8 @@ def test_akshare_industry_provider_duck_typing_integration():
                     "f8": 3.12,
                     "f104": 80,
                     "f105": 15,
+                    "f109": 1.25,
+                    "f110": 4.56,
                 }
             ],
         },
@@ -427,7 +511,9 @@ def test_akshare_industry_provider_duck_typing_integration():
         def get(self, url: str, **kwargs: Any) -> FakeResponse:
             self.calls.append({"url": url, **kwargs})
             if "clist/get" in url:
-                return FakeResponse(json.dumps(list_payload), 200)
+                if "pn=1" in url:
+                    return FakeResponse(json.dumps(list_payload), 200)
+                return FakeResponse(json.dumps({"rc": 0, "data": {"diff": []}}), 200)
             if "kline/get" in url:
                 return FakeResponse(json.dumps(kline_payload), 200)
             return FakeResponse(b"", 404)
@@ -477,3 +563,154 @@ def test_board_http_module_closure_excludes_pandas_and_akshare():
         capture_output=True, text=True, encoding="utf-8", timeout=120)
     assert completed.returncode == 0, completed.stderr
     assert "blocked []" in completed.stdout
+
+
+def test_list_pagination():
+    page1_payload = {
+        "rc": 0,
+        "data": {
+            "total": 2,
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 2.0,
+                    "f104": 10,
+                    "f105": 5,
+                    "f109": 3.0,
+                    "f110": 4.0,
+                }
+            ],
+        },
+    }
+    page2_payload = {
+        "rc": 0,
+        "data": {
+            "total": None,
+            "diff": [],
+        },
+    }
+    session = FakeSession(responses=[json.dumps(page1_payload), json.dumps(page2_payload)])
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(session.calls) == 2
+    assert "pn=1" in session.calls[0]["url"]
+    assert "pn=2" in session.calls[1]["url"]
+    assert len(records) == 1
+    assert records[0]["板块代码"] == "BK0001"
+
+
+def test_list_max_pages_cap():
+    page_payload = {
+        "rc": 0,
+        "data": {
+            "total": 1000,
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                }
+            ],
+        },
+    }
+    # Session always returns non-empty diff
+    session = FakeSession(body=json.dumps(page_payload))
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(session.calls) == 8
+    assert "pn=1" in session.calls[0]["url"]
+    assert "pn=8" in session.calls[7]["url"]
+    assert len(records) == 1
+
+
+def test_list_deduplication_by_board_code():
+    page1_payload = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 5,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                },
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2-原版",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 10,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                },
+            ]
+        },
+    }
+    page2_payload = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2-重复项",
+                    "f3": 99.0,
+                    "f8": 99.0,
+                    "f104": 99,
+                    "f105": 99,
+                    "f109": 99.0,
+                    "f110": 99.0,
+                },
+                {
+                    "f12": "BK0003",
+                    "f14": "行业3",
+                    "f3": 3.0,
+                    "f8": 3.0,
+                    "f104": 30,
+                    "f105": 15,
+                    "f109": 3.0,
+                    "f110": 3.0,
+                },
+            ]
+        },
+    }
+    page3_payload = {"rc": 0, "data": {"diff": []}}
+    session = FakeSession(responses=[
+        json.dumps(page1_payload),
+        json.dumps(page2_payload),
+        json.dumps(page3_payload),
+    ])
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(session.calls) == 3
+    assert len(records) == 3
+    codes = [r["板块代码"] for r in records]
+    assert codes == ["BK0001", "BK0002", "BK0003"]
+    assert records[1]["板块名称"] == "行业2-原版"
+    assert records[1]["涨跌幅"] == 2.0
+
+
+def test_list_request_url_host_is_push2delay():
+    empty_payload = {"rc": 0, "data": {"diff": []}}
+    session = FakeSession(json.dumps(empty_payload))
+    client = EastMoneyBoardClient(session=session)
+    client.stock_board_industry_name_em()
+
+    assert len(session.calls) == 1
+    recorded_url = session.calls[0]["url"]
+    assert recorded_url.startswith("https://push2delay.eastmoney.com/api/qt/clist/get")
+    assert "push2.eastmoney.com" not in recorded_url.replace("push2delay.eastmoney.com", "")

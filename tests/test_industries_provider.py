@@ -672,3 +672,207 @@ class TestAkShareIndustryProvider:
         assert ranking_result.coverage == len(res.observations)
         assert len(ranking_result.items) == 2
         assert ranking_result.stamp.status.value == "READY"
+
+    # 30. 包含 近5日涨跌幅 与 近20日涨跌幅 的行优先使用列表直出，且不调用 K线接口
+    def test_fetch_with_list_supplied_5d_20d_returns(self) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+            }
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 1
+        assert len(res.errors) == 0
+        obs = res.observations[0]
+        assert obs.code == "BK0420"
+        assert obs.return_5d_pct == 1.25
+        assert obs.return_20d_pct == 4.56
+        assert len(client.hist_calls) == 0
+
+    # 31. 近5日涨跌幅 与 近20日涨跌幅 为数字字符串时仍可成功解析
+    def test_fetch_with_list_supplied_returns_numeric_strings(self) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": "1.25",
+                "近20日涨跌幅": "4.56",
+            }
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 1
+        obs = res.observations[0]
+        assert obs.return_5d_pct == 1.25
+        assert obs.return_20d_pct == 4.56
+        assert len(client.hist_calls) == 0
+
+    # 32. 仅存在 近5日涨跌幅（缺少 20日） -> MALFORMED_RESPONSE
+    def test_fetch_with_only_5d_present_errors_malformed(self) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+            }
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 0
+        assert res.errors.get("BK0420") == ERROR_MALFORMED_RESPONSE
+        assert len(client.hist_calls) == 0
+
+    # 33. 仅存在 近20日涨跌幅（缺少 5日） -> MALFORMED_RESPONSE
+    def test_fetch_with_only_20d_present_errors_malformed(self) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近20日涨跌幅": 4.56,
+            }
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 0
+        assert res.errors.get("BK0420") == ERROR_MALFORMED_RESPONSE
+        assert len(client.hist_calls) == 0
+
+    # 34. 近5日涨跌幅 为 "-" 或 None 时（20日有效） -> MALFORMED_RESPONSE
+    @pytest.mark.parametrize("bad_5d", ["-", None])
+    def test_fetch_with_unparseable_or_none_5d_errors_malformed(self, bad_5d: Any) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": bad_5d,
+                "近20日涨跌幅": 4.56,
+            }
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 0
+        assert res.errors.get("BK0420") == ERROR_MALFORMED_RESPONSE
+        assert len(client.hist_calls) == 0
+
+    # 35. 存在 5日/20日收益率时，as_of > fetched_at 依然触发 DATE_MISMATCH
+    def test_fetch_date_mismatch_preempts_list_supplied_returns(self) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+            }
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        # fetched_at 在当天 14:00，早于 as_of (15:00)
+        clock_dt = datetime(2026, 9, 17, 14, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 0
+        assert res.errors.get("BK0420") == ERROR_DATE_MISMATCH
+        assert len(client.hist_calls) == 0
+
+    # 36. 混合批次：一行使用列表直出，一行无列表收益回退至历史 K线，产出 2条观测且仅 1次 hist 调用
+    def test_fetch_mixed_batch_list_supplied_and_kline_fallback(self) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+            },
+            {
+                "板块代码": "BK0425",
+                "板块名称": "互联网服务",
+                "涨跌幅": 1.2,
+                "换手率": 2.0,
+                "上涨家数": 50,
+                "下跌家数": 30,
+            },
+        ]
+        hist_df2 = _make_valid_hist_df(
+            market_date=m_date,
+            num_days=25,
+            close_override={-1: 10.0, -6: 10.0, -21: 10.0},
+        )
+        client = MockAkShareClient(
+            board_names=FakeDataFrame(records),
+            board_hists={"BK0425": hist_df2},
+        )
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 2
+        assert len(res.errors) == 0
+        assert len(client.hist_calls) == 1
+        assert client.hist_calls[0]["symbol"] == "BK0425"
+
+        obs_map = {o.code: o for o in res.observations}
+        assert obs_map["BK0420"].return_5d_pct == 1.25
+        assert obs_map["BK0420"].return_20d_pct == 4.56
+        assert obs_map["BK0425"].return_5d_pct == 0.0
+        assert obs_map["BK0425"].return_20d_pct == 0.0

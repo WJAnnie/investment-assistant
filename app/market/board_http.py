@@ -2,9 +2,7 @@
 """Pandas-free, akshare-free EastMoney industry board HTTP client.
 
 Designed for public trial environments where pandas and akshare are not available.
-Implements duck-typed methods matching AkShare's industry board interface:
-- stock_board_industry_name_em()
-- stock_board_industry_hist_em(symbol, start_date, end_date, period, adjust)
+Implements duck-typed methods matching AkShare's industry board interface.
 """
 from __future__ import annotations
 
@@ -21,10 +19,10 @@ from app.market.global_markets import (
     _BoundedHttpProvider,
 )
 
-_LIST_URL = (
-    "https://push2.eastmoney.com/api/qt/clist/get"
-    "?pn=1&pz=512&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14,f3,f8,f104,f105"
-)
+# push2delay.eastmoney.com is used because push2.eastmoney.com returns HTTP 302
+# under the inherited non-following transport (allow_redirects=False).
+_LIST_BASE_URL = "https://push2delay.eastmoney.com/api/qt/clist/get"
+_MAX_PAGES = 8
 _KLINE_BASE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 
 _DATE_HYPHEN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -124,65 +122,90 @@ class EastMoneyBoardClient(_BoundedHttpProvider):
         super().__init__(session=session, timeout=timeout)
 
     def stock_board_industry_name_em(self) -> RecordList:
-        raw_bytes = self._get(_LIST_URL, None)
-        payload = _decode_json(raw_bytes)
-        data = payload.get("data")
-        if data is None:
-            return RecordList()
-        if not isinstance(data, dict):
-            raise GlobalMarketDataError(ERROR_MALFORMED)
-        diff = data.get("diff")
-        if not diff:
-            return RecordList()
-        if isinstance(diff, list):
-            raw_rows = diff
-        elif isinstance(diff, dict):
-            raw_rows = list(diff.values())
-        else:
-            raise GlobalMarketDataError(ERROR_MALFORMED)
-
         records: list[dict[str, Any]] = []
-        for row in raw_rows:
-            if not isinstance(row, dict):
-                continue
-            raw_code = row.get("f12")
-            if raw_code is None or type(raw_code) is bool:
-                continue
-            code = str(raw_code).strip()
-            if not code:
-                continue
+        seen_codes: set[str] = set()
 
-            raw_name = row.get("f14")
-            if raw_name is None or type(raw_name) is bool:
-                continue
-            name = str(raw_name).strip()
-            if not name:
-                continue
+        for page in range(1, _MAX_PAGES + 1):
+            url = (
+                f"{_LIST_BASE_URL}?pn={page}&pz=100&po=1&np=1&fltt=2&invt=2"
+                f"&fid=f3&fs=m:90+t:2&fields=f12,f14,f3,f8,f104,f105,f109,f110"
+            )
+            raw_bytes = self._get(url, None)
+            payload = _decode_json(raw_bytes)
+            if "data" not in payload:
+                raise GlobalMarketDataError(ERROR_MALFORMED)
+            data = payload["data"]
+            if data is None:
+                break
+            if not isinstance(data, dict):
+                raise GlobalMarketDataError(ERROR_MALFORMED)
 
-            ret_pct = _parse_finite_float(row.get("f3"))
-            if ret_pct is None:
-                continue
+            diff = data.get("diff")
+            if diff is None:
+                break
+            if isinstance(diff, list):
+                if not diff:
+                    break
+                raw_rows = diff
+            elif isinstance(diff, dict):
+                if not diff:
+                    break
+                raw_rows = list(diff.values())
+            else:
+                raise GlobalMarketDataError(ERROR_MALFORMED)
 
-            turnover = _parse_finite_float(row.get("f8"))
-            if turnover is None:
-                continue
+            for row in raw_rows:
+                if not isinstance(row, dict):
+                    continue
+                raw_code = row.get("f12")
+                if raw_code is None or type(raw_code) is bool:
+                    continue
+                code = str(raw_code).strip()
+                if not code or code in seen_codes:
+                    continue
 
-            advancers = _parse_integer_count(row.get("f104"))
-            if advancers is None:
-                continue
+                raw_name = row.get("f14")
+                if raw_name is None or type(raw_name) is bool:
+                    continue
+                name = str(raw_name).strip()
+                if not name:
+                    continue
 
-            decliners = _parse_integer_count(row.get("f105"))
-            if decliners is None:
-                continue
+                ret_pct = _parse_finite_float(row.get("f3"))
+                if ret_pct is None:
+                    continue
 
-            records.append({
-                "板块代码": code,
-                "板块名称": name,
-                "涨跌幅": ret_pct,
-                "换手率": turnover,
-                "上涨家数": advancers,
-                "下跌家数": decliners,
-            })
+                turnover = _parse_finite_float(row.get("f8"))
+                if turnover is None:
+                    continue
+
+                advancers = _parse_integer_count(row.get("f104"))
+                if advancers is None:
+                    continue
+
+                decliners = _parse_integer_count(row.get("f105"))
+                if decliners is None:
+                    continue
+
+                ret_5d = _parse_finite_float(row.get("f109"))
+                if ret_5d is None:
+                    continue
+
+                ret_20d = _parse_finite_float(row.get("f110"))
+                if ret_20d is None:
+                    continue
+
+                seen_codes.add(code)
+                records.append({
+                    "板块代码": code,
+                    "板块名称": name,
+                    "涨跌幅": ret_pct,
+                    "换手率": turnover,
+                    "上涨家数": advancers,
+                    "下跌家数": decliners,
+                    "近5日涨跌幅": ret_5d,
+                    "近20日涨跌幅": ret_20d,
+                })
 
         return RecordList(records)
 
