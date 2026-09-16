@@ -180,10 +180,72 @@ class PublicTrialWorkflowTests(unittest.TestCase):
             self.assertIn('confirmed=true', output.read_text())
             second = self.shell(script, directory, TRIAL_TEST_ORIGIN=origin.as_posix())
             self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            parents = subprocess.run(['git', '--git-dir', str(origin), 'rev-list', '--parents', '-n', '1',
+                                      'public-test-data'], check=True, text=True, capture_output=True).stdout.strip().split()
+            self.assertEqual(len(parents), 1)
+            commit_count = subprocess.run(['git', '--git-dir', str(origin), 'rev-list', '--count',
+                                           'public-test-data'], check=True, text=True, capture_output=True).stdout.strip()
+            self.assertEqual(commit_count, '1')
             before = output.read_bytes()
             failed = self.shell(script, directory, TRIAL_TEST_ORIGIN=origin.as_posix(), TRIAL_TEST_FAIL_PUSH='1')
             self.assertNotEqual(failed.returncode, 0)
             self.assertEqual(output.read_bytes(), before)
+
+    def test_publish_workflow_clears_history_with_orphan_and_force_push(self):
+        script = self.steps['publish']['run']
+        self.assertIn('checkout --orphan', script)
+        self.assertIn('read-tree --empty', script)
+        self.assertIn('push --force origin HEAD:refs/heads/public-test-data', script)
+
+    def test_publish_preserves_allowed_files_across_runs_without_history_accumulation(self):
+        stub = r'''
+        gh() {
+          if [[ "$1" == "api" ]]; then echo public;
+          elif [[ "$1 $2" == "auth setup-git" ]]; then return 0;
+          else return 1; fi
+        }
+        git() {
+          if [[ "$1" == "-C" && "$3 $4" == "remote add" ]]; then
+            command git -C "$2" remote add origin "${TRIAL_TEST_ORIGIN}"
+          elif [[ "$1" == "-C" && "$3" == "push" && "${TRIAL_TEST_FAIL_PUSH:-0}" == "1" ]]; then
+            return 1
+          else command git "$@"; fi
+        }
+        '''
+        class Provider:
+            def fetch(self, code):
+                return Quote(code, 'not-used', 100.0, 1.0, 'not-used')
+
+        now = datetime(2026, 9, 14, 1, 0, tzinfo=timezone.utc)
+        later = datetime(2026, 9, 14, 3, 30, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            origin = directory / 'origin.git'
+            subprocess.run(['git', 'init', '--bare', str(origin)], check=True, capture_output=True)
+
+            output_dir = directory / 'public-trial-output'
+            payload_morning = public_trial.build_snapshot('morning', provider=Provider(), requested_at=now, generated_at=now)
+            public_trial.write_reports([payload_morning], output_dir)
+            script = stub + '\n' + self.steps['publish']['run']
+            first = self.shell(script, directory, TRIAL_TEST_ORIGIN=origin.as_posix())
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+            shutil.rmtree(output_dir)
+            payload_midday = public_trial.build_snapshot('midday', provider=Provider(), requested_at=later, generated_at=later)
+            public_trial.write_reports([payload_midday], output_dir)
+            second = self.shell(script, directory, TRIAL_TEST_ORIGIN=origin.as_posix())
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+
+            tree = subprocess.run(['git', '--git-dir', str(origin), 'ls-tree', '-r', '--name-only',
+                                   'public-test-data'], check=True, text=True, capture_output=True).stdout
+            self.assertEqual(set(tree.splitlines()), {'README.md', 'latest/morning.json', 'latest/midday.json'})
+
+            commit_count = subprocess.run(['git', '--git-dir', str(origin), 'rev-list', '--count',
+                                           'public-test-data'], check=True, text=True, capture_output=True).stdout.strip()
+            self.assertEqual(commit_count, '1')
+            parents = subprocess.run(['git', '--git-dir', str(origin), 'rev-list', '--parents', '-n', '1',
+                                      'public-test-data'], check=True, text=True, capture_output=True).stdout.strip().split()
+            self.assertEqual(len(parents), 1)
 
     def test_publish_migrates_a_valid_previous_readme_before_final_validation(self):
         script = self.steps['publish']['run']

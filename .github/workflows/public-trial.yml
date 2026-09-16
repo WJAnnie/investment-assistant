@@ -168,6 +168,8 @@ jobs:
           done
           python -m app.integration.public_trial summary --input "${publish_dir}"
           python -m app.integration.public_trial validate --input "${publish_dir}"
+          git -C "${publish_dir}" checkout --orphan orphan
+          git -C "${publish_dir}" read-tree --empty
           git -C "${publish_dir}" add -- README.md
           for stage in morning midday decision closing; do
             if [[ -f "${publish_dir}/latest/${stage}.json" ]]; then
@@ -179,7 +181,7 @@ jobs:
               -m 'Make the synthetic reminder delivery test inspectable' \
               -m $'Constraint: Public observations and synthetic fixtures only\nConfidence: high\nScope-risk: narrow\nDirective: Never add real account data to this branch\nTested: Strict public schema and offline isolation regressions'
           fi
-          git -C "${publish_dir}" push origin HEAD:refs/heads/public-test-data
+          git -C "${publish_dir}" push --force origin HEAD:refs/heads/public-test-data
           local_sha="$(git -C "${publish_dir}" rev-parse HEAD)"
           remote_sha="$(git -C "${publish_dir}" ls-remote --heads origin refs/heads/public-test-data | cut -f1)"
           if [[ "${local_sha}" != "${remote_sha}" || -z "${remote_sha}" ]]; then
