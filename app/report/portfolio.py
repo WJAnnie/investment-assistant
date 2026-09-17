@@ -391,11 +391,21 @@ def _format_decision_evidence(item):
     """
     item = item if isinstance(item, Mapping) else {}
     structure = item.get("structure")
+    if isinstance(structure, Mapping) and structure.get("outcome") == "CONFIRMED":
+        core_signal = (
+            structure.get("core_signal")
+            or structure.get("confirm_core_signal")
+            or item.get("signal")
+        )
+        action_line = f"结构已确认（信号 {core_signal}）；动作仍为研究参考，须本人复核后执行，不自动交易。"
+    else:
+        action_line = "完整分析：未就绪；动作 WAIT；建议仓位变化 +0%。补齐来源与风险证据后人工复核。"
+
     return "\n".join(
         (
             "多周期证据（缠论结构）：" + _cycle_evidence_text(structure),
             _structure_conclusion_text(structure),
-            "完整分析：未就绪；动作 WAIT；建议仓位变化 +0%。补齐来源与风险证据后人工复核。",
+            action_line,
         )
     )
 

@@ -25,6 +25,7 @@ def _sample_structure(
     stale_cycles=(),
     insufficient_cycles=(),
     missing_cycles=(),
+    core_signal=None,
 ):
     if per_cycle_status is None:
         per_cycle_status = {c: "missing" for c in CYCLE_KEYS}
@@ -40,6 +41,7 @@ def _sample_structure(
         "stale_cycles": list(stale_cycles),
         "insufficient_cycles": list(insufficient_cycles),
         "missing_cycles": list(missing_cycles),
+        "core_signal": core_signal,
     }
 
 
@@ -188,12 +190,19 @@ class DecisionEvidenceRenderTests(unittest.TestCase):
 
     def test_structure_outcomes_rendering(self):
         struct_confirmed = _sample_structure(
-            outcome="CONFIRMED", ready=True, blocked_by=[], reason_code=None
+            outcome="CONFIRMED",
+            ready=True,
+            blocked_by=[],
+            reason_code=None,
+            core_signal="SECOND_BUY",
         )
         text_conf = _format_decision_evidence({"structure": struct_confirmed})
         self.assertIn("结构已确认，仍需本人复核后再决定是否执行", text_conf)
+        self.assertIn(
+            "结构已确认（信号 SECOND_BUY）；动作仍为研究参考，须本人复核后执行，不自动交易。",
+            text_conf,
+        )
         self.assertRedLines(text_conf)
-        self.assertActionLine(text_conf)
 
         struct_pre = _sample_structure(
             outcome="PRECONFIRM", ready=False, blocked_by=["120m"], reason_code=None
@@ -213,7 +222,7 @@ class DecisionEvidenceRenderTests(unittest.TestCase):
         self.assertRedLines(text_wait)
         self.assertActionLine(text_wait)
 
-    def test_action_line_remains_fixed_wait_even_on_confirmed(self):
+    def test_action_line_renders_confirmed_message_on_confirmed(self):
         struct = _sample_structure(
             outcome="CONFIRMED",
             ready=True,
@@ -221,13 +230,14 @@ class DecisionEvidenceRenderTests(unittest.TestCase):
             reason_code=None,
             blocked_by=[],
             per_cycle_status={c: "closed" for c in CYCLE_KEYS},
+            core_signal="SECOND_BUY",
         )
         text = _format_decision_evidence({"structure": struct})
         lines = text.split("\n")
         self.assertEqual(len(lines), 3)
         self.assertEqual(
             lines[2],
-            "完整分析：未就绪；动作 WAIT；建议仓位变化 +0%。补齐来源与风险证据后人工复核。",
+            "结构已确认（信号 SECOND_BUY）；动作仍为研究参考，须本人复核后执行，不自动交易。",
         )
         self.assertRedLines(text)
 
@@ -238,10 +248,17 @@ class DecisionEvidenceRenderTests(unittest.TestCase):
                     outcome=outcome,
                     per_cycle_status={c: status for c in CYCLE_KEYS},
                     blocked_by=["core_signal", "weekly"],
+                    core_signal="SECOND_BUY",
                 )
                 text = _format_decision_evidence({"structure": struct})
                 self.assertRedLines(text)
-                self.assertActionLine(text)
+                if outcome == "CONFIRMED":
+                    self.assertIn(
+                        "结构已确认（信号 SECOND_BUY）；动作仍为研究参考，须本人复核后执行，不自动交易。",
+                        text,
+                    )
+                else:
+                    self.assertActionLine(text)
 
 
 if __name__ == "__main__":

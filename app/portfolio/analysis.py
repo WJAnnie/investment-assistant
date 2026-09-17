@@ -28,6 +28,7 @@ from app.analysis.rsi import calculate_rsi
 from app.analysis.technical_score import calculate_technical_score
 from app.analysis.trend import trend_score
 from app.chan.models import KLine
+from app.chan.multi_cycle_confirm import BUY_SIGNALS
 from app.chan.pipeline import analyze_chan
 from app.decision.engine import build_decision
 from app.domain.bars import BarStatus
@@ -484,24 +485,45 @@ def _load_historical_analysis(
             kdj=kdj,
             trend=trend,
         )
+        trend_up = trend["direction"] == "UP"
+        structure_probe = _structure_evidence(
+            holding.code,
+            holding.market,
+            options["period"],
+            lines,
+            current_time,
+            trend_up,
+            minute_context=minute_context,
+            core_signal=None,
+        )
+        data_gates_passed = (
+            structure_probe is not None
+            and structure_probe.blocked_by == ("core_signal",)
+        )
+        chan = analyze_chan(
+            lines,
+            buy_setup={
+                "trend_confirm": trend_up,
+                "multi_cycle_confirm": data_gates_passed,
+            },
+            prices=prices,
+            macd_series=macd["hist"],
+            min_span=chan_min_span,
+        )
+        core_signal_candidate = (
+            chan["signal"]
+            if data_gates_passed and chan["signal"] in BUY_SIGNALS
+            else None
+        )
         structure = _structure_evidence(
             holding.code,
             holding.market,
             options["period"],
             lines,
             current_time,
-            trend["direction"] == "UP",
+            trend_up,
             minute_context=minute_context,
-        )
-        chan = analyze_chan(
-            lines,
-            buy_setup={
-                "trend_confirm": trend["direction"] == "UP",
-                "multi_cycle_confirm": structure.ready if structure is not None else False,
-            },
-            prices=prices,
-            macd_series=macd["hist"],
-            min_span=chan_min_span,
+            core_signal=core_signal_candidate,
         )
     except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
         return _unavailable(f"历史K线分析失败：{type(exc).__name__}: {exc}")
@@ -519,6 +541,8 @@ def _load_historical_analysis(
             "missing_cycles": tuple(
                 name for name, s in structure.per_cycle_status.items() if s == "missing"
             ),
+            "core_signal": structure.confirm.core_signal.value,
+            "confirm_core_signal": structure.confirm.core_signal.value,
         }
         if structure is not None
         else None
@@ -630,7 +654,14 @@ def _decision_summary(signal, technical_score, current_position=0.0, risk_blocke
 
 
 def _structure_evidence(
-    code, market, period, lines, cutoff, trend_confirm, minute_context=None
+    code,
+    market,
+    period,
+    lines,
+    cutoff,
+    trend_confirm,
+    minute_context=None,
+    core_signal=None,
 ):
     if not isinstance(cutoff, datetime) or cutoff.tzinfo is None or cutoff.utcoffset() is None:
         raise ValueError("cutoff must be timezone-aware datetime")
@@ -690,7 +721,7 @@ def _structure_evidence(
         market=market,
         cycles=cycles,
         cutoff=cutoff,
-        core_signal=None,
+        core_signal=core_signal,
         trend_confirm=trend_confirm,
     )
 
