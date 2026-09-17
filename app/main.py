@@ -10,6 +10,7 @@ from app.market.factory import (
     create_default_collector,
     create_fundamental_provider,
     create_global_market_providers,
+    create_industry_provider,
     create_minute_snapshot_loader,
 )
 from app.market.collector import MarketCollector
@@ -229,6 +230,8 @@ def main(argv=None):
         # Minute snapshot evidence is consumed across portfolio stages without
         # performing network requests during loader construction.
         private_options["minute_snapshot_loader"] = create_minute_snapshot_loader()
+        # Industry ranking is consumed across analysis stages; construction performs no I/O.
+        private_options["industry_provider"] = create_industry_provider()
         result = run_portfolio_report(
             report_kind=args.report_kind,
             notifier=notifier,

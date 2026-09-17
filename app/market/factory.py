@@ -1,11 +1,13 @@
 import os
 
 from .akshare import AkShareProvider
+from .board_http import EastMoneyBoardClient
 from .collector import MarketCollector
 from .fund_nav import AkShareFundNavProvider
 from .fundamentals import AkShareStockEvidenceProvider
 from .global_markets import FredTreasuryProvider, YahooGlobalMarketProvider
 from .hk_index import AkShareHKIndexProvider
+from .industries import AkShareIndustryProvider
 from .minute.eastmoney import create_minute_snapshot_loader
 from .sina import SinaProvider
 from .tencent import TencentHistoryProvider
@@ -16,6 +18,13 @@ from app.portfolio.valuation import PortfolioValuationRouter
 def create_fundamental_provider():
     """Create the stock fundamental/valuation provider without any request."""
     return AkShareStockEvidenceProvider()
+
+
+def create_industry_provider(session=None):
+    """Create the industry ranking provider without any request."""
+    return AkShareIndustryProvider(
+        client=EastMoneyBoardClient(session=session, timeout=10)
+    )
 
 
 def create_global_market_providers(session=None):

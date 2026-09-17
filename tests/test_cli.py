@@ -147,6 +147,7 @@ class CliTests(unittest.TestCase):
         output = StringIO()
         sentinel_fundamental = object()
         sentinel_minute = object()
+        sentinel_industry = object()
 
         with patch("app.main.FeishuNotifier", create=True) as notifier_type, patch(
             "app.main.run_portfolio_report", create=True, return_value=result
@@ -154,7 +155,9 @@ class CliTests(unittest.TestCase):
             "app.main.create_fundamental_provider", return_value=sentinel_fundamental
         ) as create_fundamental, patch(
             "app.main.create_minute_snapshot_loader", return_value=sentinel_minute
-        ) as create_minute, redirect_stdout(output):
+        ) as create_minute, patch(
+            "app.main.create_industry_provider", return_value=sentinel_industry
+        ) as create_industry, redirect_stdout(output):
             exit_code = main_module.main(
                 ["--portfolio", "--report-kind", "closing", "--no-notify"]
             )
@@ -163,11 +166,13 @@ class CliTests(unittest.TestCase):
         notifier_type.assert_not_called()
         create_fundamental.assert_called_once_with()
         create_minute.assert_called_once_with()
+        create_industry.assert_called_once_with()
         run_report.assert_called_once_with(
             report_kind="closing",
             notifier=None,
             fundamental_provider=sentinel_fundamental,
             minute_snapshot_loader=sentinel_minute,
+            industry_provider=sentinel_industry,
         )
         self.assertNotIn("global_provider", run_report.call_args.kwargs)
         self.assertNotIn("treasury_fallback", run_report.call_args.kwargs)

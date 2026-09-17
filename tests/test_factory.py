@@ -4,9 +4,15 @@ from unittest.mock import patch
 
 from app.chan.models import KLine
 from app.market.akshare import AkShareProvider
-from app.market.factory import create_default_collector, create_portfolio_valuation_router
+from app.market.board_http import EastMoneyBoardClient
+from app.market.factory import (
+    create_default_collector,
+    create_industry_provider,
+    create_portfolio_valuation_router,
+)
 from app.market.fund_nav import AkShareFundNavProvider
 from app.market.hk_index import AkShareHKIndexProvider
+from app.market.industries import AkShareIndustryProvider
 from app.market.collector import MarketCollector
 from app.market.models import Quote
 from app.portfolio.valuation import PortfolioValuationRouter
@@ -88,6 +94,16 @@ class FactoryTests(unittest.TestCase):
         exchange_fetch.assert_not_called()
         nav_fetch.assert_not_called()
         hk_fetch.assert_not_called()
+
+    def test_create_industry_provider_constructs_bounded_client_without_network_calls(self):
+        with patch.object(EastMoneyBoardClient, "_get", side_effect=AssertionError("network call made")):
+            provider = create_industry_provider()
+
+        self.assertIsInstance(provider, AkShareIndustryProvider)
+        client = getattr(provider, "client", getattr(provider, "_client", None))
+        self.assertIsInstance(client, EastMoneyBoardClient)
+        self.assertFalse(client.session.trust_env)
+        self.assertLessEqual(client.timeout, 10)
 
 
 if __name__ == "__main__":
