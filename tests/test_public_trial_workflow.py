@@ -59,8 +59,10 @@ class PublicTrialWorkflowTests(unittest.TestCase):
         self.assertEqual(options['fetch-depth'], 1)
         self.assertIs(options['sparse-checkout-cone-mode'], False)
         self.assertEqual(set(options['sparse-checkout'].splitlines()), {
-            '/.github/workflows/public-trial.yml', '/app/integration/__init__.py',
-            '/app/integration/public_trial.py', '/app/market/sina.py', '/app/market/models.py',
+            '/.github/workflows/public-trial.yml', '/app/analysis/industry.py',
+            '/app/domain/evidence.py', '/app/integration/__init__.py',
+            '/app/integration/public_trial.py', '/app/market/board_http.py',
+            '/app/market/industries.py', '/app/market/sina.py', '/app/market/models.py',
             '/app/market/global_markets.py', '/app/notify/feishu.py',
             '/tests/test_global_markets.py', '/tests/test_public_trial.py',
             '/tests/test_public_trial_delivery.py', '/tests/test_public_trial_workflow.py',

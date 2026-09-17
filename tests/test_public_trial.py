@@ -20,6 +20,8 @@ from zoneinfo import ZoneInfo
 from app.integration import public_trial as trial
 from app.market.global_markets import INSTRUMENTS, SourceObservation
 from app.market.models import Quote
+from app.analysis.industry import IndustryObservation
+from app.market.industries import IndustryFetch, SOURCE_AKSHARE_EASTMONEY_BOARD
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,14 +33,14 @@ SECRET_NAME = "SECRET-QUOTE-NAME-7b2a"
 AUTO = object()
 STAGE_CLOCKS = {"morning": "09:00", "midday": "11:30", "decision": "14:30", "closing": "16:10"}
 COVERAGE = {
-    "global_markets": "PUBLIC_OBSERVATIONS", "industry_ranking": "NOT_IMPLEMENTED",
+    "global_markets": "PUBLIC_OBSERVATIONS", "industry_ranking": "PUBLIC_OBSERVATIONS",
     "morning_baseline": "MISSING", "multi_timeframe": "NOT_IMPLEMENTED",
     "prediction_pairing": "MISSING", "exchange_calendar": "NOT_IMPLEMENTED",
 }
 TOP_FIELDS = {
     "schema_version", "data_classification", "purpose", "stage", "execution_mode",
     "requested_at", "generated_at", "scheduled_for", "timing_status", "market",
-    "global_market", "coverage", "synthetic_account", "decision", "real_account_trial_day",
+    "global_market", "industries", "coverage", "synthetic_account", "decision", "real_account_trial_day",
 }
 QUOTE_FIELDS = {"code", "name", "price", "change_pct", "source_as_of", "freshness", "error_code"}
 GLOBAL_FIELDS = {
@@ -123,8 +125,43 @@ class FailingGlobalProvider(FakeGlobalProvider):
         raise RuntimeError(SECRET)
 
 
+class FakeIndustryProvider:
+    def __init__(self, *, raises=False, empty=False):
+        self.calls = []
+        self.raises = raises
+        self.empty = empty
+
+    def fetch(self, cutoff, market_date):
+        self.calls.append((cutoff, market_date))
+        if self.raises:
+            raise RuntimeError(SECRET)
+        if self.empty:
+            return IndustryFetch(observations=())
+
+        fetched_at = trial._now()
+        as_of = fetched_at - timedelta(minutes=30)
+        observations = []
+        for i in range(1, 11):
+            observations.append(
+                IndustryObservation(
+                    code=f"BK00{i:02d}",
+                    name=f"板块{i:02d}",
+                    as_of=as_of,
+                    fetched_at=fetched_at,
+                    source=SOURCE_AKSHARE_EASTMONEY_BOARD,
+                    return_1d_pct=10.0 - i,
+                    return_5d_pct=5.0,
+                    return_20d_pct=3.0,
+                    turnover_rate=1.5,
+                    advancers=20,
+                    decliners=5,
+                )
+            )
+        return IndustryFetch(observations=tuple(observations))
+
+
 def build(stage="morning", *, provider=None, global_provider=None,
-          treasury_fallback=None, minutes=0, day=MONDAY, after=1,
+          treasury_fallback=None, industry_provider=None, minutes=0, day=MONDAY, after=1,
           mode="scheduled", generated_at=AUTO):
     requested = slot(stage, day) + timedelta(minutes=minutes)
     kwargs = {} if generated_at is AUTO and after is None else {"generated_at": (
@@ -133,6 +170,7 @@ def build(stage="morning", *, provider=None, global_provider=None,
         stage, provider=provider or FakeProvider(),
         global_provider=global_provider or FakeGlobalProvider(),
         treasury_fallback=treasury_fallback or FailingGlobalProvider(),
+        industry_provider=FakeIndustryProvider() if industry_provider is None else industry_provider,
         requested_at=requested, execution_mode=mode, **kwargs)
 
 
@@ -179,7 +217,18 @@ def legacy(payload=None):
     result = json.loads(json.dumps(scheduled() if payload is None else payload))
     result["schema_version"] = "public-trial/v1"
     result["coverage"]["global_markets"] = "NOT_IMPLEMENTED"
-    result.pop("global_market")
+    result["coverage"]["industry_ranking"] = "NOT_IMPLEMENTED"
+    result.pop("global_market", None)
+    result.pop("industries", None)
+    return result
+
+
+def frozen_v2(payload=None):
+    """Exact shape of the snapshots already published on the data branch."""
+    result = json.loads(json.dumps(scheduled() if payload is None else payload))
+    result["schema_version"] = "public-trial/v2"
+    result["coverage"]["industry_ranking"] = "NOT_IMPLEMENTED"
+    result.pop("industries", None)
     return result
 
 
@@ -189,7 +238,7 @@ class ContractTests(unittest.TestCase):
         fallback = FailingGlobalProvider()
         payload = build(global_provider=yahoo, treasury_fallback=fallback)
 
-        self.assertEqual(payload["schema_version"], "public-trial/v2")
+        self.assertEqual(payload["schema_version"], "public-trial/v3")
         self.assertEqual(
             [item["symbol"] for item in payload["global_market"]["quotes"]],
             list(INSTRUMENTS),
@@ -381,7 +430,7 @@ class ContractTests(unittest.TestCase):
     def test_top_level_schema_coverage_account_and_decision_are_exact(self):
         payload = scheduled()
         self.assertEqual(set(payload), TOP_FIELDS)
-        self.assertEqual(payload["schema_version"], "public-trial/v2")
+        self.assertEqual(payload["schema_version"], "public-trial/v3")
         self.assertEqual(payload["data_classification"], "public_market_and_synthetic_test")
         self.assertEqual(payload["purpose"], "delivery_test_not_investment_advice")
         self.assertEqual(payload["stage"], "morning")
@@ -512,16 +561,19 @@ class ContractTests(unittest.TestCase):
                 provider = FakeProvider()
                 global_provider = FakeGlobalProvider()
                 fallback = FakeGlobalProvider()
+                industry_provider = FakeIndustryProvider()
                 with self.assertRaises(ValueError):
                     trial.build_snapshot(
                         case.get("stage", "morning"), provider=provider,
                         global_provider=global_provider, treasury_fallback=fallback,
+                        industry_provider=industry_provider,
                         requested_at=case.get("requested_at", slot("morning")),
                         generated_at=case.get("generated_at", slot("morning")),
                         execution_mode=case.get("mode", "manual_replay"))
                 self.assertEqual(provider.calls, [])
                 self.assertEqual(global_provider.calls, [])
                 self.assertEqual(fallback.calls, [])
+                self.assertEqual(industry_provider.calls, [])
 
     def test_default_generated_at_is_measured_after_fetching(self):
         observed = []
@@ -641,7 +693,7 @@ class ValidationTests(unittest.TestCase):
             "public_classification": [("data_classification", "public")],
             "missing_classification": [(("data_classification",), None)],
             "purpose": [("purpose", "investment_advice")],
-            "schema": [("schema_version", "public-trial/v3")],
+            "schema": [("schema_version", "public-trial/v4")],
             "mode": [("execution_mode", "automatic")],
             "quote_provider": [("market", "quotes", 0, "provider", SECRET)],
         }
@@ -813,6 +865,93 @@ class ValidationTests(unittest.TestCase):
         self.assertNotIn("🌍 隔夜全球市场", rendered)
 
 
+class IndustryRankingIntegrationTests(unittest.TestCase):
+    def test_morning_snapshot_industry_ranking_is_ready_and_valid(self):
+        payload = build("morning")
+        industries = payload["industries"]
+        self.assertEqual(industries["status"], "READY")
+        items = industries["items"]
+        self.assertGreater(len(items), 0)
+        self.assertEqual(set(items[0]), set(trial._INDUSTRY_ITEM_FIELDS))
+        self.assertEqual([i["rank"] for i in items], list(range(1, len(items) + 1)))
+        self.assertIsInstance(items[0]["score"], float)
+        self.assertTrue(industries["as_of"].endswith("+08:00"))
+
+    def test_non_morning_stages_do_not_collect_industry_data(self):
+        for stage in ("midday", "decision", "closing"):
+            with self.subTest(stage=stage):
+                provider = FakeIndustryProvider()
+                payload = build(stage, industry_provider=provider)
+                self.assertEqual(payload["industries"], trial._industry_not_collected())
+                self.assertEqual(provider.calls, [])
+
+    def test_industry_provider_exception_fails_closed(self):
+        failing = FakeIndustryProvider(raises=True)
+        payload = build("morning", industry_provider=failing)
+        self.assertIsNone(trial.validate_snapshot(payload))
+        industries = payload["industries"]
+        self.assertEqual(industries["status"], "FAILED")
+        self.assertEqual(industries["error"], "PROVIDER_UNAVAILABLE")
+        self.assertEqual(industries["items"], [])
+        self.assertIsNone(industries["as_of"])
+
+    def test_industry_provider_empty_observations_fails_closed_and_renders(self):
+        empty_prov = FakeIndustryProvider(empty=True)
+        payload = build("morning", industry_provider=empty_prov)
+        self.assertIsNone(trial.validate_snapshot(payload))
+        industries = payload["industries"]
+        self.assertEqual(industries["status"], "FAILED")
+        self.assertEqual(industries["error"], "NO_USABLE_DATA")
+        self.assertEqual(industries["items"], [])
+        rendered = trial.render_report(payload)
+        self.assertIn("行业数据不足或已过期", rendered)
+
+    def test_validator_rejects_tampered_industry_payloads(self):
+        extra_key = tamper(scheduled(), lambda p: p["industries"]["items"][0].__setitem__("extra", 123))
+        with self.assertRaises(ValueError):
+            trial.validate_snapshot(extra_key)
+
+        scrambled_rank = tamper(scheduled(), lambda p: p["industries"]["items"].reverse())
+        with self.assertRaises(ValueError):
+            trial.validate_snapshot(scrambled_rank)
+
+        invalid_err = tamper(scheduled(), lambda p: p["industries"].update({"status": "FAILED", "as_of": None, "error": "UNKNOWN_ERROR", "items": []}))
+        with self.assertRaises(ValueError):
+            trial.validate_snapshot(invalid_err)
+
+        ready_empty = tamper(scheduled(), lambda p: p["industries"].update({"status": "READY", "items": []}))
+        with self.assertRaises(ValueError):
+            trial.validate_snapshot(ready_empty)
+
+        failed_with_as_of = tamper(scheduled(), lambda p: p["industries"].update({"status": "FAILED", "as_of": "2026-09-14T08:30:00+08:00", "error": "PROVIDER_UNAVAILABLE", "items": []}))
+        with self.assertRaises(ValueError):
+            trial.validate_snapshot(failed_with_as_of)
+
+        empty_code = tamper(scheduled(), lambda p: p["industries"]["items"][0].__setitem__("code", ""))
+        with self.assertRaises(ValueError):
+            trial.validate_snapshot(empty_code)
+
+    def test_render_report_industry_ready_and_failed_branches(self):
+        ready_payload = build("morning")
+        rendered_ready = trial.render_report(ready_payload)
+        top_name = ready_payload["industries"]["items"][0]["name"]
+        self.assertIn("🔥 今日重点行业", rendered_ready)
+        self.assertIn(top_name, rendered_ready)
+        self.assertIn("评分：", rendered_ready)
+
+        failed_payload = build("morning", industry_provider=FakeIndustryProvider(raises=True))
+        rendered_failed = trial.render_report(failed_payload)
+        self.assertIn(trial._INDUSTRY_CAUSE_LABELS["PROVIDER_UNAVAILABLE"], rendered_failed)
+        for item in ready_payload["industries"]["items"]:
+            self.assertNotIn(item["name"], rendered_failed)
+
+    def test_legacy_v1_compatibility_with_industry_ranking(self):
+        old = legacy()
+        self.assertIsNone(trial.validate_snapshot(old))
+        self.assertEqual(old["coverage"]["industry_ranking"], "NOT_IMPLEMENTED")
+        self.assertNotIn("industries", old)
+
+
 class WriteTests(unittest.TestCase):
     def batch(self):
         return [build(stage, after=1) for stage in trial.STAGES]
@@ -844,7 +983,7 @@ class WriteTests(unittest.TestCase):
 
             loaded = trial._read_reports(output)
             self.assertEqual([item["schema_version"] for item in loaded],
-                             ["public-trial/v1", "public-trial/v2"])
+                             ["public-trial/v1", "public-trial/v3"])
             persisted = json.loads((output / "latest" / "morning.json").read_text(encoding="utf-8"))
             self.assertEqual(json.dumps(persisted, ensure_ascii=False, sort_keys=True), before)
             self.assertNotIn("global_market", persisted)
@@ -901,6 +1040,31 @@ class WriteTests(unittest.TestCase):
             (output / "README.md").mkdir(parents=True)
             with self.assertRaises(ValueError):
                 trial.write_reports(self.batch(), output)
+
+    def test_frozen_v2_published_shape_still_validates(self):
+        self.assertIsNone(trial.validate_snapshot(frozen_v2()))
+        self.assertNotIn("industries", frozen_v2())
+
+    def test_summary_migrates_a_data_branch_of_frozen_v2_snapshots(self):
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            (output / "latest").mkdir(parents=True)
+            for stage in trial.STAGES:
+                payload = frozen_v2(build(stage))
+                payload["stage"] = stage
+                (output / "latest" / f"{stage}.json").write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+            self.assertEqual(trial.main(["summary", "--input", str(output)]), 0)
+            readme = (output / "README.md").read_text(encoding="utf-8")
+            self.assertIn("尚未接入", readme)
+            for token in ("manual_replay", "available_unverified", "public-trial/v2"):
+                self.assertNotIn(token, readme)
+
+    def test_frozen_v2_is_refused_as_new_write_input(self):
+        with TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                trial.write_reports([frozen_v2()], Path(directory) / "out")
 
 
 class ImportIsolationTests(unittest.TestCase):

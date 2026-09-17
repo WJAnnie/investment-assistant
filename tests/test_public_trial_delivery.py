@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
+import socket
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -77,9 +78,35 @@ class PublicTrialDeliveryTests(unittest.TestCase):
             def fetch(self, code):
                 return Quote(code, 'SECRET_NAME', 100.0, 1.0, 'SECRET_TIMESTAMP')
 
+        class GlobalProvider:
+            def __init__(self, **_kwargs):
+                pass
+
+            def fetch(self, _symbol):
+                raise RuntimeError('offline fixture: no global data')
+
+        class IndustryClient:
+            def __init__(self, **_kwargs):
+                pass
+
+        class IndustryProvider:
+            def __init__(self, **_kwargs):
+                pass
+
+            def fetch(self, _cutoff, _market_date):
+                raise RuntimeError('offline fixture: no industry data')
+
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'public'
-            with patch.object(public_trial, 'SinaProvider', Provider):
+            with patch.object(public_trial, 'SinaProvider', Provider), \
+                    patch.object(public_trial, 'YahooGlobalMarketProvider',
+                                 GlobalProvider), \
+                    patch.object(public_trial, 'FredTreasuryProvider',
+                                 GlobalProvider), \
+                    patch.object(public_trial, 'AkShareIndustryProvider',
+                                 IndustryProvider), \
+                    patch.object(public_trial, 'EastMoneyBoardClient',
+                                 IndustryClient):
                 self.assertEqual(public_trial.main([
                     'collect', '--stage', 'all', '--output', str(output),
                 ]), 0)
@@ -241,6 +268,59 @@ class PublicTrialDeliveryTests(unittest.TestCase):
                         result = public_trial.send_test_notification([self.snapshot()])
                         self.assertEqual(result, 'accepted' if allowed else 'failed')
                         self.assertEqual(send.call_count, int(allowed))
+
+    def test_cli_collect_all_never_opens_a_socket(self):
+        """Regression: the live collect path must stay offline in CI."""
+        attempts = []
+        real_connect = socket.socket.connect
+
+        def guard(sock, address):
+            attempts.append(address)
+            raise AssertionError(f'OUTBOUND CONNECT: {address!r}')
+
+        class Provider:
+            def __init__(self, **_kwargs):
+                pass
+
+            def fetch(self, code):
+                return Quote(code, 'fixed', 100.0, 1.0, 'fixed')
+
+        class GlobalProvider:
+            def __init__(self, **_kwargs):
+                pass
+
+            def fetch(self, _symbol):
+                raise RuntimeError('offline fixture')
+
+        class IndustryClient:
+            def __init__(self, **_kwargs):
+                pass
+
+        class IndustryProvider:
+            def __init__(self, **_kwargs):
+                pass
+
+            def fetch(self, _cutoff, _market_date):
+                raise RuntimeError('offline fixture')
+
+        socket.socket.connect = guard
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                with patch.object(public_trial, 'SinaProvider', Provider), \
+                        patch.object(public_trial, 'YahooGlobalMarketProvider',
+                                     GlobalProvider), \
+                        patch.object(public_trial, 'FredTreasuryProvider',
+                                     GlobalProvider), \
+                        patch.object(public_trial, 'AkShareIndustryProvider',
+                                     IndustryProvider), \
+                        patch.object(public_trial, 'EastMoneyBoardClient',
+                                     IndustryClient):
+                    self.assertEqual(public_trial.main([
+                        'collect', '--stage', 'all', '--output', directory,
+                    ]), 0)
+        finally:
+            socket.socket.connect = real_connect
+        self.assertEqual(attempts, [])
 
 
 if __name__ == '__main__':

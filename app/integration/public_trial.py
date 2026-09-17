@@ -25,6 +25,10 @@ from app.market.global_markets import (
     SourceObservation,
     YahooGlobalMarketProvider,
 )
+from app.analysis.industry import DEFAULT_INDUSTRY_POLICY, rank_industries
+from app.domain.evidence import EvidenceStatus
+from app.market.board_http import EastMoneyBoardClient
+from app.market.industries import AkShareIndustryProvider
 
 
 SHANGHAI = timezone(timedelta(hours=8))
@@ -36,7 +40,8 @@ PUBLIC_SYMBOLS = {
     'SH.000016': '上证50', 'SZ.399005': '中小100',
 }
 LEGACY_SCHEMA_VERSION = 'public-trial/v1'
-SCHEMA_VERSION = 'public-trial/v2'
+FROZEN_SCHEMA_VERSION = 'public-trial/v2'
+SCHEMA_VERSION = 'public-trial/v3'
 DATA_CLASSIFICATION = 'public_market_and_synthetic_test'
 _ERRORS = {'NO_QUOTE', 'PROVIDER_UNAVAILABLE', 'INVALID_QUOTE'}
 GLOBAL_SYMBOLS = tuple(INSTRUMENTS)
@@ -73,6 +78,25 @@ _GLOBAL_STATUS_LABELS = {
     'partial': '完整性：部分全球行情暂不可用，其余项目照常展示。',
     'unavailable': '完整性：全球行情暂不可用。',
 }
+INDUSTRY_NOT_COLLECTED = 'NOT_COLLECTED_FOR_STAGE'
+INDUSTRY_ITEMS_LIMIT = 8
+INDUSTRY_RENDER_ITEMS = 5
+_INDUSTRY_ERRORS = frozenset({
+    'PROVIDER_UNAVAILABLE', 'NETWORK_UNAVAILABLE', 'MALFORMED_RESPONSE',
+    'NO_USABLE_DATA', 'DATE_MISMATCH',
+})
+_INDUSTRY_CAUSE_LABELS = {
+    'PROVIDER_UNAVAILABLE': '行业数据源暂时不可用',
+    'NETWORK_UNAVAILABLE': '行业数据源暂时不可用',
+    'MALFORMED_RESPONSE': '行业数据格式异常',
+    'NO_USABLE_DATA': '行业数据不足或已过期',
+    'DATE_MISMATCH': '行业数据时间不一致',
+}
+_INDUSTRY_ITEM_FIELDS = (
+    'rank', 'code', 'name', 'score',
+    'return_1d_pct', 'return_5d_pct', 'return_20d_pct',
+)
+_INDUSTRY_BLOCK_FIELDS = frozenset({'status', 'as_of', 'error', 'items'})
 
 
 def _global_value(record):
@@ -156,7 +180,7 @@ def _metadata(stage, requested_at, generated_at, execution_mode, *, schema_versi
         timing = 'late'
     else:
         timing = 'on_time'
-    if schema_version not in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
+    if schema_version not in (LEGACY_SCHEMA_VERSION, FROZEN_SCHEMA_VERSION, SCHEMA_VERSION):
         _invalid()
     return {
         'schema_version': schema_version, 'data_classification': DATA_CLASSIFICATION,
@@ -167,7 +191,9 @@ def _metadata(stage, requested_at, generated_at, execution_mode, *, schema_versi
         'coverage': {
             'global_markets': ('NOT_IMPLEMENTED' if schema_version == LEGACY_SCHEMA_VERSION
                                else 'PUBLIC_OBSERVATIONS'),
-            'industry_ranking': 'NOT_IMPLEMENTED',
+            'industry_ranking': ('PUBLIC_OBSERVATIONS'
+                                 if schema_version == SCHEMA_VERSION
+                                 else 'NOT_IMPLEMENTED'),
             'morning_baseline': 'MISSING', 'multi_timeframe': 'NOT_IMPLEMENTED',
             'prediction_pairing': 'MISSING', 'exchange_calendar': 'NOT_IMPLEMENTED',
         },
@@ -345,9 +371,65 @@ def _global_market(records, *, stage):
     return {'status': status, 'quotes': records}
 
 
+def _market_date(reference):
+    """The last closed mainland weekday from a weekday-only rule."""
+    day = reference.date() - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def _industry_not_collected():
+    return {'status': INDUSTRY_NOT_COLLECTED, 'as_of': None, 'error': None, 'items': []}
+
+
+def _industry_failure(error_code):
+    if error_code not in _INDUSTRY_ERRORS:
+        _invalid()
+    return {'status': 'FAILED', 'as_of': None, 'error': error_code, 'items': []}
+
+
+def _industry_item(rank, code, name, score, return_1d_pct, return_5d_pct, return_20d_pct):
+    return {
+        'rank': rank, 'code': code, 'name': name, 'score': score,
+        'return_1d_pct': return_1d_pct, 'return_5d_pct': return_5d_pct,
+        'return_20d_pct': return_20d_pct,
+    }
+
+
+def _industry_block(industry_provider):
+    """Fail-closed: only a READY ranking is published; anything else is one cause line."""
+    now = _now()
+    try:
+        fetch = industry_provider.fetch(now, _market_date(now))
+        observations = fetch.observations
+        if type(observations) is not tuple:
+            return _industry_failure('MALFORMED_RESPONSE')
+        ranking = rank_industries(observations, now, DEFAULT_INDUSTRY_POLICY)
+    except Exception:
+        return _industry_failure('PROVIDER_UNAVAILABLE')
+    if ranking.stamp.status is not EvidenceStatus.READY or not ranking.items:
+        return _industry_failure('NO_USABLE_DATA')
+    items = [
+        _industry_item(
+            item.rank, item.code, item.name, float(item.score),
+            float(item.observation.return_1d_pct),
+            float(item.observation.return_5d_pct),
+            float(item.observation.return_20d_pct),
+        )
+        for item in ranking.items[:INDUSTRY_ITEMS_LIMIT]
+    ]
+    return {
+        'status': ranking.stamp.status.value,
+        'as_of': ranking.stamp.as_of.isoformat(),
+        'error': None,
+        'items': items,
+    }
+
+
 def build_snapshot(stage, *, provider, requested_at, generated_at=None,
                    execution_mode='manual_replay', global_provider=None,
-                   treasury_fallback=None):
+                   treasury_fallback=None, industry_provider=None):
     # Validate intent BEFORE network requests. Capture completion afterwards,
     # without moving the original requested date when collection crosses midnight.
     _metadata(stage, requested_at, requested_at if generated_at is None else generated_at, execution_mode)
@@ -367,6 +449,8 @@ def build_snapshot(stage, *, provider, requested_at, generated_at=None,
                         expected_source=expected_source))
                    for symbol, observation, error, expected_source in raw_global]
     result['global_market'] = _global_market(records, stage=stage)
+    result['industries'] = (_industry_block(industry_provider) if stage == 'morning'
+                            else _industry_not_collected())
     validate_snapshot(result)
     return result
 
@@ -445,13 +529,80 @@ def _validate_global(payload, expected):
     expected['global_market'] = _global_market(checked, stage=stage)
 
 
+def _validate_industry(payload, expected):
+    industries = payload.get('industries')
+    if type(industries) is not dict or set(industries.keys()) != _INDUSTRY_BLOCK_FIELDS:
+        _invalid()
+    status = industries['status']
+    if status not in (INDUSTRY_NOT_COLLECTED, 'FAILED', 'READY'):
+        _invalid()
+
+    if status == INDUSTRY_NOT_COLLECTED:
+        if not _same(industries, _industry_not_collected()):
+            _invalid()
+        expected['industries'] = _industry_not_collected()
+        return
+
+    if status == 'FAILED':
+        error = industries['error']
+        if type(error) is not str or error not in _INDUSTRY_ERRORS:
+            _invalid()
+        if industries['as_of'] is not None or industries['items'] != []:
+            _invalid()
+        expected['industries'] = _industry_failure(error)
+        return
+
+    # status == 'READY'
+    if industries['error'] is not None:
+        _invalid()
+    _parse_time(industries['as_of'])
+    items = industries['items']
+    if type(items) is not list or not (1 <= len(items) <= INDUSTRY_ITEMS_LIMIT):
+        _invalid()
+
+    expected_ranks = list(range(1, len(items) + 1))
+    seen_codes = set()
+    rebuilt_items = []
+    for expected_rank, item in zip(expected_ranks, items):
+        if type(item) is not dict or set(item.keys()) != set(_INDUSTRY_ITEM_FIELDS):
+            _invalid()
+        rank = item['rank']
+        if type(rank) is not int or type(rank) is bool or rank != expected_rank:
+            _invalid()
+        code = item['code']
+        if type(code) is not str or not code or code in seen_codes:
+            _invalid()
+        seen_codes.add(code)
+        name = item['name']
+        if type(name) is not str or not name:
+            _invalid()
+        score = item['score']
+        r1 = item['return_1d_pct']
+        r5 = item['return_5d_pct']
+        r20 = item['return_20d_pct']
+        for val in (score, r1, r5, r20):
+            if type(val) is bool or not _finite_number(val):
+                _invalid()
+        rebuilt_items.append(_industry_item(
+            rank, code, name, score, r1, r5, r20
+        ))
+
+    expected['industries'] = {
+        'status': status,
+        'as_of': industries['as_of'],
+        'error': None,
+        'items': rebuilt_items,
+    }
+
+
 def validate_snapshot(payload):
     """Strict allowlist for exact legacy v1 and current v2 snapshots."""
     try:
         if type(payload) is not dict:
             _invalid()
         schema_version = payload['schema_version']
-        if schema_version not in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
+        if schema_version not in (LEGACY_SCHEMA_VERSION, FROZEN_SCHEMA_VERSION,
+                                  SCHEMA_VERSION):
             _invalid()
         expected = _metadata(
             payload['stage'], _parse_time(payload['requested_at']),
@@ -459,8 +610,10 @@ def validate_snapshot(payload):
             schema_version=schema_version,
         )
         _validate_domestic(payload, expected)
-        if schema_version == SCHEMA_VERSION:
+        if schema_version != LEGACY_SCHEMA_VERSION:
             _validate_global(payload, expected)
+        if schema_version == SCHEMA_VERSION:
+            _validate_industry(payload, expected)
         if not _same(payload, expected):
             _invalid()
     except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
@@ -485,10 +638,19 @@ def render_report(payload):
         f"本次模式：{timing}", '',
     ]
     if stage == 'morning':
-        lines += _render_global_market(payload) + [
-            '', '市场趋势与风险：不依据这些观测推断强弱；行业排序与评分尚未接入。',
-            '以下只是公共国内指数观测，不代表你的持仓：', '',
-        ]
+        lines += _render_global_market(payload)
+        industry = payload.get('industries')
+        if industry is None:
+            lines += ['', '行业排序与评分：尚未接入。', '']
+        elif industry['status'] == 'READY':
+            as_of = _parse_time(industry['as_of'])
+            lines += ['', '🔥 今日重点行业', f"数据时间：{as_of:%m-%d %H:%M}"]
+            for item in industry['items'][:INDUSTRY_RENDER_ITEMS]:
+                lines.append(f"{item['rank']}. {item['name']}　评分：{item['score']:.1f}")
+            lines += ['仅为公开行业观测，未读取你的持仓。', '']
+        else:
+            lines += ['', f"行业排序：{_INDUSTRY_CAUSE_LABELS.get(industry['error'], '本时段不采集行业数据')}，因此今日不做行业强弱判断。", '']
+        lines += ['以下只是公共国内指数观测，不代表你的持仓：', '']
         for quote in payload['market']['quotes']:
             value = (f"{quote['price']:.4f}（{quote['change_pct']:+.2f}%）"
                      if quote['error_code'] is None else _QUOTE_ERROR_LABELS[quote['error_code']])
@@ -497,7 +659,7 @@ def render_report(payload):
     elif stage == 'midday':
         lines += [
             '相对当天晨报：缺少可靠基线，暂无法比较；不把累计成本收益写成午盘变化。',
-            '资金流/行业评分变化：未接入；暂不补仓，等待经核实的数据。',
+            '资金流与行业评分变化：本时段不重新采集行业数据，也未与晨报配对，暂不补仓。',
         ]
     elif stage == 'decision':
         lines += [
@@ -691,9 +853,13 @@ def main(argv=None):
                 provider = SinaProvider(session=session)
                 global_provider = YahooGlobalMarketProvider(session=session)
                 treasury_fallback = FredTreasuryProvider(session=session)
+                industry_provider = AkShareIndustryProvider(
+                    client=EastMoneyBoardClient(session=session, timeout=10))
                 snapshots = [build_snapshot(
                     stage, provider=provider, global_provider=global_provider,
-                    treasury_fallback=treasury_fallback, requested_at=requested_at,
+                    treasury_fallback=treasury_fallback,
+                    industry_provider=industry_provider,
+                    requested_at=requested_at,
                     execution_mode=args.mode)
                              for stage in (STAGES if args.stage == 'all' else [args.stage])]
             write_reports(snapshots, args.output)
