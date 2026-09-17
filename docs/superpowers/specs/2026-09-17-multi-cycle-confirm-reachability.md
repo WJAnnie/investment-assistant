@@ -1,6 +1,6 @@
 # 多周期缠论「CONFIRMED 不可达」：实测证据与判定
 
-状态：**已判定（阻塞项未解决，需要单独决策）**。本文只记录实测证据与判定，本轮不改动任何门禁。
+状态：**已解除（2026-09-18 分支 codex/multi-cycle-confirm-p2）**。P1/P2/P3 已按「装配而非放宽」路线全部解决：P2 跨日 120m 装配（app/market/minute/history.py）；P3 真实买点标志生产者（app/chan/pipeline.py derive_buy_flags）；P1 两阶段 core_signal 接线（app/portfolio/analysis.py）。全量 1319 tests 通过。原始判定证据保留如下。
 
 ## 结论
 
@@ -87,3 +87,4 @@ CN 一个交易日的 120m 桶恰好是 2 个（上午 09:30–11:30、下午 13
 `分析=自动 / 提醒=自动 / 交易=人工确认`，`auto_execute` 恒为 `False`。
 `CONFIRMED` 不可达**不会**产生错误交易指令，只会让「多周期证据」长期停在
 「待补齐」而不是给出一个未经验证的确认。
+
