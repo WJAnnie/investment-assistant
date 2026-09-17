@@ -222,7 +222,13 @@ class EastMoneyAdapterTests(unittest.TestCase):
             for i in range(1, 6)
         ]
         api_data = {"rc": 0, "data": {"klines": rows}}
-        with unittest.mock.patch.object(provider, "_get", return_value=json.dumps(api_data).encode("utf-8")):
+
+        def fake_get(url, params=None):
+            if "klt=5" in url:
+                return json.dumps({"rc": 0, "data": {"klines": []}}).encode("utf-8")
+            return json.dumps(api_data).encode("utf-8")
+
+        with unittest.mock.patch.object(provider, "_get", side_effect=fake_get):
             snap = provider.snapshot(holding, now=now)
 
         self.assertIsInstance(snap, MinuteSnapshot)
@@ -306,7 +312,13 @@ class EastMoneyAdapterTests(unittest.TestCase):
         now = datetime(2026, 9, 17, 15, 5, tzinfo=SHANGHAI)
         provider = EastMoneyMinuteProvider()
         api_data = {"rc": 0, "data": {"klines": rows_1m}}
-        with unittest.mock.patch.object(provider, "_get", return_value=json.dumps(api_data).encode("utf-8")):
+
+        def fake_get(url, params=None):
+            if "klt=5" in url:
+                return json.dumps({"rc": 0, "data": {"klines": []}}).encode("utf-8")
+            return json.dumps(api_data).encode("utf-8")
+
+        with unittest.mock.patch.object(provider, "_get", side_effect=fake_get):
             snapshot = provider.snapshot(_make_holding("600519"), now=now)
 
         self.assertEqual(len(snapshot.lines), 48)

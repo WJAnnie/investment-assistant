@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from app.chan.models import KLine
 from app.domain.bars import BarStatus
 from app.domain.timeframe import Timeframe
-from app.market.minute.resample import current_bar, resample_minutes
+from app.market.minute.resample import _validate_price_line, current_bar, resample_minutes
 from app.market.minute.session import TradingDay
 from app.utils.redaction import redact_secrets
 
@@ -34,6 +34,7 @@ class MinuteSnapshot:
     fetched_at: datetime
     base_minutes: int
     timestamp_semantics: str
+    history_120m_lines: tuple[KLine, ...] = ()
 
 
 def load_minute_context(holding, *, snapshot_loader=None, now):
@@ -90,11 +91,49 @@ def _snapshot_context(snapshot, holding, now):
         latest = latest if isinstance(latest, datetime) else datetime.fromisoformat(latest)
         if _local_time(latest) > fetched_at:
             raise ValueError("source bars cannot be newer than the fetch time")
+
+    if not isinstance(snapshot.history_120m_lines, (list, tuple)):
+        raise ValueError("history_120m_lines must be a tuple or list")
+    prev_hist_t: datetime | None = None
+    for h_line in snapshot.history_120m_lines:
+        if not isinstance(h_line, KLine):
+            raise TypeError("history_120m_lines must contain only KLine instances")
+        h_t = h_line.time
+        if isinstance(h_t, str):
+            try:
+                h_dt = datetime.fromisoformat(h_t)
+            except Exception as exc:
+                raise ValueError(f"invalid ISO time in history 120m line: {h_t!r}") from exc
+        elif isinstance(h_t, datetime):
+            h_dt = h_t
+        else:
+            raise TypeError("KLine time must be an ISO string or datetime")
+        if h_dt.tzinfo is None or h_dt.utcoffset() is None:
+            raise ValueError("history 120m line time must be timezone-aware")
+        h_shanghai = _local_time(h_dt)
+        if h_shanghai.date() == snapshot.day.market_date:
+            raise ValueError("history 120m line date must not match snapshot market_date")
+        if h_shanghai > fetched_at:
+            raise ValueError("history 120m line cannot be newer than fetched_at")
+        if prev_hist_t is not None and h_shanghai <= prev_hist_t:
+            raise ValueError("history 120m lines must be strictly increasing")
+        prev_hist_t = h_shanghai
+        if h_shanghai.second != 0 or h_shanghai.microsecond != 0:
+            raise ValueError("history 120m line time must have 0 seconds and microseconds")
+        if (h_shanghai.hour, h_shanghai.minute) not in ((11, 30), (15, 0)):
+            raise ValueError(
+                f"history 120m line timestamp {h_shanghai.time()} is not a valid 120m close (must be 11:30 or 15:00)"
+            )
+        _validate_price_line(h_line)
+
     selected = {cycle: current_bar(bars[cycle], now=now) for cycle in MINUTE_TIMEFRAMES}
     cycles = {
         cycle.value: _cycle_summary(bars[cycle], selected[cycle], now)
         for cycle in MINUTE_TIMEFRAMES
     }
+    cycles[Timeframe.MIN_120.value]["closed_lines"] = (
+        tuple(snapshot.history_120m_lines) + cycles[Timeframe.MIN_120.value]["closed_lines"]
+    )
     states = {cycle: details["status"] for cycle, details in cycles.items()}
     input_ready = all(state == BarStatus.CLOSED.value for state in states.values())
     available = all(state in {BarStatus.CLOSED.value, BarStatus.FORMING.value}

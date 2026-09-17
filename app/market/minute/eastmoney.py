@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import json
 import math
 from typing import Any
@@ -17,10 +17,12 @@ from app.market.global_markets import (
     TIMEOUT_SECONDS,
 )
 from app.market.minute.context import MinuteSnapshot
+from app.market.minute.history import build_history_120m, parse_history_rows
 from app.market.minute.session import cn_trading_day, TradingDay, SessionWindow
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 _KLINE_BASE_URL = "https://push2delay.eastmoney.com/api/qt/stock/kline/get"
+_HISTORY_KLINE_BASE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 
 
 def _secid(code: str) -> str:
@@ -224,6 +226,20 @@ def aggregate_to_5m(
     return tuple(result)
 
 
+def _format_yyyymmdd(val: Any, name: str) -> str:
+    if isinstance(val, (date, datetime)):
+        return val.strftime("%Y%m%d")
+    if isinstance(val, str):
+        cleaned = val.strip()
+        if len(cleaned) == 8 and cleaned.isdigit():
+            return cleaned
+    if isinstance(val, int) and not isinstance(val, bool):
+        s = str(val)
+        if len(s) == 8:
+            return s
+    raise ValueError(f"{name} must be a date, datetime, or YYYYMMDD string, got {val!r}")
+
+
 class EastMoneyMinuteProvider(_BoundedHttpProvider):
     """EastMoney 1-minute klines HTTP provider bounded by transport constraints."""
 
@@ -280,6 +296,63 @@ class EastMoneyMinuteProvider(_BoundedHttpProvider):
 
         return klines
 
+    def fetch_history_rows(
+        self,
+        code: str,
+        *,
+        now: datetime,
+        beg: Any,
+        end: Any,
+        lmt: int = 600,
+    ) -> list[str]:
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware datetime")
+        shanghai_now = now.astimezone(SHANGHAI)
+
+        beg_str = _format_yyyymmdd(beg, "beg")
+        end_str = _format_yyyymmdd(end, "end")
+        if int(beg_str) > int(end_str):
+            raise ValueError(f"beg ({beg_str}) must be <= end ({end_str})")
+
+        secid = _secid(code)
+        params = (
+            f"secid={secid}&fields1=f1,f2,f3,f4,f5,f6"
+            f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+            f"&klt=5&fqt=1&beg={beg_str}&end={end_str}&lmt={lmt}"
+        )
+        url = f"{_HISTORY_KLINE_BASE_URL}?{params}"
+
+        try:
+            raw_bytes = self._get(url, None)
+        except GlobalMarketDataError as err:
+            raise GlobalMarketDataError(ERROR_SOURCE_ERROR) from err
+
+        try:
+            text = raw_bytes.decode("utf-8")
+            payload = json.loads(text)
+        except Exception:
+            raise GlobalMarketDataError(ERROR_MALFORMED) from None
+
+        if not isinstance(payload, dict):
+            raise GlobalMarketDataError(ERROR_MALFORMED)
+
+        if payload.get("rc") != 0:
+            raise GlobalMarketDataError(ERROR_MALFORMED)
+
+        data = payload.get("data")
+        if data is None:
+            return []
+        if not isinstance(data, dict):
+            raise GlobalMarketDataError(ERROR_MALFORMED)
+
+        klines = data.get("klines")
+        if not klines:
+            return []
+        if not isinstance(klines, list):
+            raise GlobalMarketDataError(ERROR_MALFORMED)
+
+        return klines
+
     def snapshot(self, holding: Any, *, now: datetime) -> MinuteSnapshot:
         if getattr(holding, "market", None) != "CN" or getattr(holding, "valuation_mode", None) != "exchange":
             raise ValueError("EastMoney minute source only supports CN exchange holdings")
@@ -302,6 +375,19 @@ class EastMoneyMinuteProvider(_BoundedHttpProvider):
 
         lines = aggregate_to_5m(raw_klines, day=day, now=shanghai_now)
 
+        # History 120m fetch
+        beg_date = shanghai_now.date() - timedelta(days=4)
+        end_date = shanghai_now.date()
+        raw_history = self.fetch_history_rows(code, now=shanghai_now, beg=beg_date, end=end_date)
+        if raw_history:
+            try:
+                parsed_history = parse_history_rows(raw_history, now=shanghai_now)
+                history_120m_lines = build_history_120m(parsed_history, now=shanghai_now)
+            except (TypeError, ValueError) as err:
+                raise GlobalMarketDataError(ERROR_MALFORMED) from err
+        else:
+            history_120m_lines = ()
+
         return MinuteSnapshot(
             code=code,
             market="CN",
@@ -311,6 +397,7 @@ class EastMoneyMinuteProvider(_BoundedHttpProvider):
             fetched_at=shanghai_now,
             base_minutes=5,
             timestamp_semantics="close",
+            history_120m_lines=history_120m_lines,
         )
 
 
