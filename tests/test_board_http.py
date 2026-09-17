@@ -846,3 +846,610 @@ def test_list_f124_iso_shanghai_offset():
     assert len(records) == 1
     assert records[0]["数据时间"] == "2026-09-16T15:39:32+08:00"
     assert records[0]["数据时间"].endswith("+08:00")
+
+
+def test_list_convergence_sweep1_divergent_sweep2_converges():
+    """首轮不一致、次轮收敛：页1戳 T1、页2戳 T2，重抓后两页同为 T1。
+    返回 2 行且所有 数据时间 相同；断言请求次数 == 页数 + 重抓页数。
+    """
+    t1_epoch = 1789544372
+    t2_epoch = 1789544375
+    expected_t1 = "2026-09-16T15:39:32+08:00"
+
+    page1_payload = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": t1_epoch,
+                }
+            ]
+        },
+    }
+    page2_divergent = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t2_epoch,
+                }
+            ]
+        },
+    }
+    page2_converged = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t1_epoch,
+                }
+            ]
+        },
+    }
+
+    session = FakeSession(responses=[
+        json.dumps(page1_payload),
+        json.dumps(page2_divergent),
+        json.dumps(page2_converged),
+    ])
+    client = EastMoneyBoardClient(session=session, max_pages=2)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 2
+    assert records[0]["数据时间"] == expected_t1
+    assert records[1]["数据时间"] == expected_t1
+    assert records[0]["数据时间"] == records[1]["数据时间"]
+    # 请求次数 == 页数(2) + 重抓页数(1) = 3
+    assert len(session.calls) == 3
+    assert "pn=1" in session.calls[0]["url"]
+    assert "pn=2" in session.calls[1]["url"]
+    assert "pn=2" in session.calls[2]["url"]
+
+
+def test_list_convergence_mixed_timestamps_in_single_page():
+    """同一页内混戳：某页同时含 T1 与 T2 两行 → 该页被判为「不等于主导戳」并被重抓，最终收敛。"""
+    t1_epoch = 1789544372
+    t2_epoch = 1789544375
+    expected_t1 = "2026-09-16T15:39:32+08:00"
+
+    page_mixed = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": t1_epoch,
+                },
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t2_epoch,
+                },
+            ]
+        },
+    }
+    page_fixed = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": t1_epoch,
+                },
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t1_epoch,
+                },
+            ]
+        },
+    }
+
+    session = FakeSession(responses=[
+        json.dumps(page_mixed),
+        json.dumps(page_fixed),
+    ])
+    client = EastMoneyBoardClient(session=session, max_pages=1)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 2
+    assert records[0]["数据时间"] == expected_t1
+    assert records[1]["数据时间"] == expected_t1
+    assert len(session.calls) == 2
+    assert "pn=1" in session.calls[0]["url"]
+    assert "pn=1" in session.calls[1]["url"]
+
+
+def test_list_convergence_never_converges_bounded():
+    """始终不收敛：始终返回两个不同戳 → 不抛异常，返回行中存在 2 个不同 数据时间，
+    且请求次数精确等于可控页数下的上界。
+    """
+    t1_epoch = 1789544372
+    t2_epoch = 1789544375
+
+    page1 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": t1_epoch,
+                }
+            ]
+        },
+    }
+    page2 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t2_epoch,
+                }
+            ]
+        },
+    }
+
+    # max_pages=2, max_sweeps=4:
+    # Sweep 1: pn=1 (page1), pn=2 (page2) -> 2 requests
+    # Sweep 2: pn=2 (page2) -> 1 request
+    # Sweep 3: pn=2 (page2) -> 1 request
+    # Sweep 4: pn=2 (page2) -> 1 request
+    # Upper bound of requests for this 2-page scenario = 2 + (4 - 1) * 1 = 5
+    session = FakeSession(responses=[
+        json.dumps(page1),
+        json.dumps(page2),
+        json.dumps(page2),
+        json.dumps(page2),
+        json.dumps(page2),
+    ])
+    client = EastMoneyBoardClient(session=session, max_pages=2, max_sweeps=4)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 2
+    timestamps = {r["数据时间"] for r in records}
+    assert len(timestamps) == 2
+    assert len(session.calls) == 5
+
+
+def test_list_convergence_sweep1_consistent_no_refetch():
+    """首轮即一致：请求次数恰好等于页数，没有任何重抓。"""
+    page1 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": F124,
+                }
+            ]
+        },
+    }
+    page2 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": F124,
+                }
+            ]
+        },
+    }
+
+    session = FakeSession(responses=[json.dumps(page1), json.dumps(page2)])
+    client = EastMoneyBoardClient(session=session, max_pages=2)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 2
+    assert records[0]["数据时间"] == EXPECTED_ISO_TIME
+    assert records[1]["数据时间"] == EXPECTED_ISO_TIME
+    assert len(session.calls) == 2
+
+
+def test_list_convergence_boundary_single_page_and_empty_diff():
+    """边界：仅一页且只有 1 行有效 → 1 次请求即收敛；diff 为空 → 返回 0 行且无异常。"""
+    page1 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": F124,
+                }
+            ]
+        },
+    }
+    session1 = FakeSession(responses=[json.dumps(page1)])
+    client1 = EastMoneyBoardClient(session=session1, max_pages=1)
+    records1 = client1.stock_board_industry_name_em().to_dict(orient="records")
+    assert len(records1) == 1
+    assert records1[0]["数据时间"] == EXPECTED_ISO_TIME
+    assert len(session1.calls) == 1
+
+    empty_payload = {"rc": 0, "data": {"diff": []}}
+    session2 = FakeSession(responses=[json.dumps(empty_payload)])
+    client2 = EastMoneyBoardClient(session=session2)
+    records2 = client2.stock_board_industry_name_em().to_dict(orient="records")
+    assert len(records2) == 0
+    assert len(session2.calls) == 1
+
+
+def test_list_convergence_retry_empty_does_not_drop_rows():
+    """重抓返回空 diff 时不丢弃已有行：两页戳不一致，重抓页2返回空 diff。
+    断言返回行数 == 2（BK0001 与 BK0002 都在，页2 不得消失），且戳不唯一。
+    """
+    t1_epoch = 1789544372
+    t2_epoch = 1789544375
+
+    page1 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": t1_epoch,
+                }
+            ]
+        },
+    }
+    page2 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t2_epoch,
+                }
+            ]
+        },
+    }
+    empty_page = {"rc": 0, "data": {"diff": []}}
+
+    # max_pages=2, 默认 max_sweeps=4: Sweep 1 (2 calls) + 3 retries (3 calls) = 5
+    session = FakeSession(responses=[
+        json.dumps(page1),
+        json.dumps(page2),
+        json.dumps(empty_page),
+        json.dumps(empty_page),
+        json.dumps(empty_page),
+    ])
+    client = EastMoneyBoardClient(session=session, max_pages=2)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 2
+    codes = {r["板块代码"] for r in records}
+    assert codes == {"BK0001", "BK0002"}
+    timestamps = {r["数据时间"] for r in records}
+    assert len(timestamps) == 2
+
+
+def test_list_convergence_retry_empty_then_recovers():
+    """重抓先空后恢复：第一次重抓页2返回空、第二次重抓页2返回与 T1 一致的页 → 最终收敛为 2 行且戳全为 T1。"""
+    t1_epoch = 1789544372
+    t2_epoch = 1789544375
+    expected_t1 = "2026-09-16T15:39:32+08:00"
+
+    page1 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": t1_epoch,
+                }
+            ]
+        },
+    }
+    page2_divergent = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t2_epoch,
+                }
+            ]
+        },
+    }
+    page2_converged = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t1_epoch,
+                }
+            ]
+        },
+    }
+    empty_page = {"rc": 0, "data": {"diff": []}}
+
+    # Sweep 1: page1, page2_divergent -> divergent_pages = [2]
+    # Sweep 2 retry: empty_page -> 保留 page2_divergent -> 仍未收敛
+    # Sweep 3 retry: page2_converged -> 收敛为 expected_t1
+    session = FakeSession(responses=[
+        json.dumps(page1),
+        json.dumps(page2_divergent),
+        json.dumps(empty_page),
+        json.dumps(page2_converged),
+    ])
+    client = EastMoneyBoardClient(session=session, max_pages=2)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 2
+    assert {r["板块代码"] for r in records} == {"BK0001", "BK0002"}
+    assert records[0]["数据时间"] == expected_t1
+    assert records[1]["数据时间"] == expected_t1
+    assert len(session.calls) == 4
+
+
+def test_list_convergence_retry_empty_keeps_retrying_bounded():
+    """两页始终不一致且重抓始终为空：不抛异常、返回 2 行、请求次数严格有界。"""
+    t1_epoch = 1789544372
+    t2_epoch = 1789544375
+
+    page1 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": t1_epoch,
+                }
+            ]
+        },
+    }
+    page2 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t2_epoch,
+                }
+            ]
+        },
+    }
+    empty_page = {"rc": 0, "data": {"diff": []}}
+
+    # max_pages=2, max_sweeps=4:
+    # 请求次数严格有界 == 2 + (max_sweeps - 1) * 1 = 5
+    session = FakeSession(responses=[
+        json.dumps(page1),
+        json.dumps(page2),
+        json.dumps(empty_page),
+        json.dumps(empty_page),
+        json.dumps(empty_page),
+    ])
+    client = EastMoneyBoardClient(session=session, max_pages=2, max_sweeps=4)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 2
+    assert {r["板块代码"] for r in records} == {"BK0001", "BK0002"}
+    assert len(session.calls) == 5
+    timestamps = {r["数据时间"] for r in records}
+    assert len(timestamps) == 2
+
+
+def test_list_convergence_retry_empty_preserves_data_within_sweep():
+    """三页：页1/页3 戳 T1，页2 戳 T2；重抓页2 全部返回空 → 断言返回 3 行、页1 与页3 的行原样保留、戳仍不唯一。"""
+    t1_epoch = 1789544372
+    t2_epoch = 1789544375
+
+    page1 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0001",
+                    "f14": "行业1",
+                    "f3": 1.0,
+                    "f8": 1.0,
+                    "f104": 10,
+                    "f105": 10,
+                    "f109": 1.0,
+                    "f110": 1.0,
+                    "f124": t1_epoch,
+                }
+            ]
+        },
+    }
+    page2 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0002",
+                    "f14": "行业2",
+                    "f3": 2.0,
+                    "f8": 2.0,
+                    "f104": 20,
+                    "f105": 20,
+                    "f109": 2.0,
+                    "f110": 2.0,
+                    "f124": t2_epoch,
+                }
+            ]
+        },
+    }
+    page3 = {
+        "rc": 0,
+        "data": {
+            "diff": [
+                {
+                    "f12": "BK0003",
+                    "f14": "行业3",
+                    "f3": 3.0,
+                    "f8": 3.0,
+                    "f104": 30,
+                    "f105": 30,
+                    "f109": 3.0,
+                    "f110": 3.0,
+                    "f124": t1_epoch,
+                }
+            ]
+        },
+    }
+    empty_page = {"rc": 0, "data": {"diff": []}}
+
+    # max_pages=3, max_sweeps=4:
+    # Sweep 1: page1, page2, page3 -> divergent_pages = [2]
+    # Sweep 2: empty_page -> 保留 page2
+    # Sweep 3: empty_page -> 保留 page2
+    # Sweep 4: empty_page -> 保留 page2
+    # 达到上限，走末尾并集分支，返回 3 行
+    session = FakeSession(responses=[
+        json.dumps(page1),
+        json.dumps(page2),
+        json.dumps(page3),
+        json.dumps(empty_page),
+        json.dumps(empty_page),
+        json.dumps(empty_page),
+    ])
+    client = EastMoneyBoardClient(session=session, max_pages=3, max_sweeps=4)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 3
+    by_code = {r["板块代码"]: r for r in records}
+    assert set(by_code.keys()) == {"BK0001", "BK0002", "BK0003"}
+    # 页1 与页3 的行原样保留
+    assert by_code["BK0001"]["数据时间"] == by_code["BK0003"]["数据时间"]
+    assert by_code["BK0002"]["数据时间"] != by_code["BK0001"]["数据时间"]
+    timestamps = {r["数据时间"] for r in records}
+    assert len(timestamps) == 2
+
