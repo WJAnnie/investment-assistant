@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from app.market.global_markets import (
     ERROR_MALFORMED,
+    ERROR_SOURCE_ERROR,
     GlobalMarketDataError,
     _BoundedHttpProvider,
 )
@@ -25,6 +26,7 @@ from app.market.global_markets import (
 _LIST_BASE_URL = "https://push2delay.eastmoney.com/api/qt/clist/get"
 _MAX_PAGES = 8
 _MAX_SWEEPS = 4
+_PAGE_SIZE = 100
 _KLINE_BASE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 
 _DATE_HYPHEN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -159,11 +161,12 @@ class EastMoneyBoardClient(_BoundedHttpProvider):
         super().__init__(session=session, timeout=timeout)
         self._max_pages = max_pages
         self._max_sweeps = max_sweeps
+        self._last_total: int | None = None
 
     def _fetch_page(self, page: int) -> list[dict[str, Any]] | None:
         # fid 决定服务端排序，盘中行序漂移会导致翻页重复/丢行，故必须用稳定唯一键 f12；返回结果由调用方 rank_industries 重新排序，与 fid 无关
         url = (
-            f"{_LIST_BASE_URL}?pn={page}&pz=100&po=1&np=1&fltt=2&invt=2"
+            f"{_LIST_BASE_URL}?pn={page}&pz={_PAGE_SIZE}&po=1&np=1&fltt=2&invt=2"
             f"&fid=f12&fs=m:90+t:2&fields=f12,f14,f3,f8,f104,f105,f109,f110,f124"
         )
         raw_bytes = self._get(url, None)
@@ -175,6 +178,10 @@ class EastMoneyBoardClient(_BoundedHttpProvider):
             return None
         if not isinstance(data, dict):
             raise GlobalMarketDataError(ERROR_MALFORMED)
+
+        raw_total = data.get("total")
+        if type(raw_total) is int and raw_total >= 0:
+            self._last_total = raw_total
 
         diff = data.get("diff")
         if diff is None:
@@ -260,15 +267,44 @@ class EastMoneyBoardClient(_BoundedHttpProvider):
     def stock_board_industry_name_em(self) -> RecordList:
         max_pages = self._max_pages if self._max_pages is not None else _MAX_PAGES
         max_sweeps = self._max_sweeps if self._max_sweeps is not None else _MAX_SWEEPS
+        self._last_total = None
 
         pages_records: dict[int, list[dict[str, Any]]] = {}
+        missing_pages: set[int] = set()
+        expected_pages: int | None = None
 
-        # Sweep 1: 分页抓取，直到 diff 为空或达到 max_pages
+        # Sweep 1: 首轮抓取；通过 total 区分「取数正常结束」与「瞬时丢页」，避免横截面被静默截断导致 fail-open
         for page in range(1, max_pages + 1):
             page_rows = self._fetch_page(page)
-            if page_rows is None:
+            if page_rows:
+                pages_records[page] = page_rows
+                # total 字段仅在真实响应到达后可知，在此处惰性换算应抓总页数
+                if expected_pages is None and self._last_total:
+                    expected_pages = -(-self._last_total // _PAGE_SIZE)  # ceil 向上取整
+                continue
+            # 空响应/空 diff：仅当已越过 total 承诺的有效页码时才视为正常结束
+            if expected_pages is None or page > expected_pages:
                 break
-            pages_records[page] = page_rows
+            # 否则属于承诺存在却抓取落空的可疑丢页：记录并继续抓取后续页，绝不静默截断
+            missing_pages.add(page)
+
+        # 瞬时丢页有界重抓：对承诺存在但在首轮丢落的页进行补偿抓取
+        if missing_pages:
+            for _ in range(max(1, max_sweeps - 1)):
+                still_missing: set[int] = set()
+                for p in sorted(missing_pages):
+                    new_rows = self._fetch_page(p)
+                    if new_rows:
+                        pages_records[p] = new_rows
+                    else:
+                        still_missing.add(p)
+                missing_pages = still_missing
+                if not missing_pages:
+                    break
+            if missing_pages:
+                # total 承诺这些页存在但有界重抓仍无法补齐，拒绝返回残缺横截面（诚实失败），
+                # 迫使上层 fail-closed 标记 FAILED，绝不基于残缺数据计算错误排名
+                raise GlobalMarketDataError(ERROR_SOURCE_ERROR)
 
         for sweep in range(1, max_sweeps + 1):
             all_rows = [row for p in sorted(pages_records.keys()) for row in pages_records[p]]

@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from app.market.board_http import EastMoneyBoardClient, RecordList
-from app.market.global_markets import GlobalMarketDataError
+from app.market.global_markets import ERROR_SOURCE_ERROR, GlobalMarketDataError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1557,5 +1557,103 @@ def test_list_pagination_all_boards_reachable_via_stable_key():
     for call in session.calls:
         assert "fid=f12" in call["url"]
         assert "fid=f3" not in call["url"]
+
+
+def _make_mock_rows(start_idx: int, count: int, timestamp: int = F124) -> list[dict[str, Any]]:
+    return [
+        {
+            "f12": f"BK{i:04d}",
+            "f14": f"行业{i}",
+            "f3": 1.0,
+            "f8": 1.0,
+            "f104": 10,
+            "f105": 10,
+            "f109": 1.0,
+            "f110": 1.0,
+            "f124": timestamp,
+        }
+        for i in range(start_idx, start_idx + count)
+    ]
+
+
+def test_list_transient_empty_page_is_retried_not_silently_truncated():
+    """total=250 时第 2 页瞬时返回空 diff，有界重抓后成功补齐，不被静默截断。"""
+    page1 = json.dumps({"rc": 0, "data": {"total": 250, "diff": _make_mock_rows(1, 100)}})
+    page2_empty = json.dumps({"rc": 0, "data": {"total": 250, "diff": []}})
+    page3 = json.dumps({"rc": 0, "data": {"total": 250, "diff": _make_mock_rows(201, 50)}})
+    page4_end = json.dumps({"rc": 0, "data": None})
+    page2_retry = json.dumps({"rc": 0, "data": {"total": 250, "diff": _make_mock_rows(101, 100)}})
+
+    session = FakeSession(responses=[page1, page2_empty, page3, page4_end, page2_retry])
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 250
+    codes = {r["板块代码"] for r in records}
+    assert len(codes) == 250
+    pn2_calls = [c for c in session.calls if "pn=2" in c["url"]]
+    assert len(pn2_calls) == 2
+
+
+def test_list_missing_promised_page_never_recovers_fails_closed():
+    """total=250 承诺 3 页但第 2 页持续丢页重抓不回，必须 fail-closed 抛异常而不能静默返回残缺横截面。"""
+    page1 = json.dumps({"rc": 0, "data": {"total": 250, "diff": _make_mock_rows(1, 100)}})
+    page2_empty = json.dumps({"rc": 0, "data": {"total": 250, "diff": []}})
+    page3 = json.dumps({"rc": 0, "data": {"total": 250, "diff": _make_mock_rows(201, 50)}})
+    default_empty = json.dumps({"rc": 0, "data": {"total": 250, "diff": []}})
+
+    session = FakeSession(responses=[page1, page2_empty, page3], body=default_empty)
+    client = EastMoneyBoardClient(session=session)
+
+    with pytest.raises(GlobalMarketDataError) as exc_info:
+        client.stock_board_industry_name_em()
+    assert exc_info.value.code == ERROR_SOURCE_ERROR
+
+
+def test_list_absent_total_keeps_legacy_end_of_data_break():
+    """响应不带 total 字段时，遇空页保持既有取数结束行为，不触发重试且不报错。"""
+    page1 = json.dumps({"rc": 0, "data": {"diff": _make_mock_rows(1, 1)}})
+    page2_empty = json.dumps({"rc": 0, "data": {"diff": []}})
+
+    session = FakeSession(responses=[page1, page2_empty])
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 1
+    assert len(session.calls) == 2
+    assert len([c for c in session.calls if "pn=2" in c["url"]]) == 1
+
+
+def test_list_full_cross_section_with_total_makes_no_extra_retry():
+    """total=496 正常抓满 5 页且第 6 页为 None 正常结束时，恰好 6 次请求，无额外重试。"""
+    page1 = json.dumps({"rc": 0, "data": {"total": 496, "diff": _make_mock_rows(1, 100)}})
+    page2 = json.dumps({"rc": 0, "data": {"total": 496, "diff": _make_mock_rows(101, 100)}})
+    page3 = json.dumps({"rc": 0, "data": {"total": 496, "diff": _make_mock_rows(201, 100)}})
+    page4 = json.dumps({"rc": 0, "data": {"total": 496, "diff": _make_mock_rows(301, 100)}})
+    page5 = json.dumps({"rc": 0, "data": {"total": 496, "diff": _make_mock_rows(401, 96)}})
+    page6 = json.dumps({"rc": 0, "data": None})
+
+    session = FakeSession(responses=[page1, page2, page3, page4, page5, page6])
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 496
+    codes = {r["板块代码"] for r in records}
+    assert len(codes) == 496
+    assert len(session.calls) == 6
+
+
+def test_list_declared_total_below_page_size_still_fetches_second_page():
+    """total=2 但第 1 页仅 1 行时，必须仍然请求第 2 页确认结束，锁定行为不回归成 1 次请求。"""
+    page1 = json.dumps({"rc": 0, "data": {"total": 2, "diff": _make_mock_rows(1, 1)}})
+    page2 = json.dumps({"rc": 0, "data": {"diff": []}})
+
+    session = FakeSession(responses=[page1, page2])
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(session.calls) == 2
+    assert len(records) == 1
+
 
 
