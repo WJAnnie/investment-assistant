@@ -6,7 +6,11 @@ import sys
 from datetime import datetime
 
 from app.utils.logger import get_logger
-from app.market.factory import create_default_collector, create_global_market_providers
+from app.market.factory import (
+    create_default_collector,
+    create_fundamental_provider,
+    create_global_market_providers,
+)
 from app.market.collector import MarketCollector
 from app.market.sina import SinaProvider
 from app.notify.feishu import FeishuNotifier
@@ -218,6 +222,9 @@ def main(argv=None):
             global_provider, treasury_fallback = create_global_market_providers()
             private_options["global_provider"] = global_provider
             private_options["treasury_fallback"] = treasury_fallback
+        # Fundamental/valuation evidence is consumed in every analysis stage
+        # (unlike overnight global market data), and provider construction performs no I/O.
+        private_options["fundamental_provider"] = create_fundamental_provider()
         result = run_portfolio_report(
             report_kind=args.report_kind,
             notifier=notifier,

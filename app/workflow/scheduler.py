@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from app.notify.feishu import FeishuNotifier
-from app.market.factory import create_global_market_providers
+from app.market.factory import create_fundamental_provider, create_global_market_providers
 from app.report.portfolio import format_failure_reminder
 from app.report.reminders import format_reminder
 from app.utils.private_storage import require_private_execution
@@ -37,16 +37,17 @@ FOUR_STAGE_SCHEDULES = DEFAULT_REPORT_SCHEDULES[1:]
 
 
 def _run_scheduled_portfolio_report(notifier, report_title, report_kind, private_state_dir=None, clock=None,
-                                    global_provider=None, treasury_fallback=None):
+                                    global_provider=None, treasury_fallback=None, fundamental_provider=None):
     result = _collect_scheduled_portfolio_report(
         notifier, report_kind, private_state_dir, clock,
         global_provider=global_provider, treasury_fallback=treasury_fallback,
+        fundamental_provider=fundamental_provider,
     )
     return _finish_scheduled_result(notifier, report_title, result)
 
 
 def _collect_scheduled_portfolio_report(notifier, report_kind, private_state_dir, clock, run_id=None, *,
-                                        global_provider=None, treasury_fallback=None):
+                                        global_provider=None, treasury_fallback=None, fundamental_provider=None):
     options = {}
     if run_id is not None:
         options["run_id"] = run_id
@@ -59,6 +60,8 @@ def _collect_scheduled_portfolio_report(notifier, report_kind, private_state_dir
             options["global_provider"] = global_provider
         if treasury_fallback is not None:
             options["treasury_fallback"] = treasury_fallback
+    if fundamental_provider is not None:
+        options["fundamental_provider"] = fundamental_provider
     try:
         result = run_portfolio_report(report_kind=report_kind, notifier=notifier, **options)
         if (
@@ -124,12 +127,13 @@ def _checked_stage_clock(report_kind, source):
 
 
 def _run_four_stage_report(notifier, report_title, report_kind, private_state_dir=None, clock=None, trial_ledger=None,
-                           global_provider=None, treasury_fallback=None):
+                           global_provider=None, treasury_fallback=None, fundamental_provider=None):
     """Serialize a trial attempt, including its checks, send and observation."""
     if trial_ledger is None:
         return _execute_four_stage_report(notifier, report_title, report_kind, private_state_dir, clock,
                                           global_provider=global_provider,
-                                          treasury_fallback=treasury_fallback)
+                                          treasury_fallback=treasury_fallback,
+                                          fundamental_provider=fundamental_provider)
     result = _new_four_stage_result(report_kind)
     try:
         require_private_execution()
@@ -138,7 +142,8 @@ def _run_four_stage_report(notifier, report_title, report_kind, private_state_di
         with trial_ledger.execution_lock():
             result = _execute_four_stage_report(
                 notifier, report_title, report_kind, private_state_dir, clock, trial_ledger,
-                global_provider=global_provider, treasury_fallback=treasury_fallback)
+                global_provider=global_provider, treasury_fallback=treasury_fallback,
+                fundamental_provider=fundamental_provider)
     except Exception as exc:
         # Preserve the actual delivery outcome even if releasing a lock fails.
         result["errors"].append(f"four-stage execution: {type(exc).__name__}")
@@ -156,7 +161,8 @@ def _new_four_stage_result(report_kind):
 
 
 def _execute_four_stage_report(notifier, report_title, report_kind, private_state_dir=None, clock=None,
-                               trial_ledger=None, global_provider=None, treasury_fallback=None):
+                               trial_ledger=None, global_provider=None, treasury_fallback=None,
+                               fundamental_provider=None):
     """Check wall time before collection and before sending; never backfill."""
     result = _new_four_stage_result(report_kind)
     observed_slot = False
@@ -197,7 +203,8 @@ def _execute_four_stage_report(notifier, report_title, report_kind, private_stat
         result.update(_collect_scheduled_portfolio_report(
             None, report_kind, private_state_dir, clock,
             run_id=result["run_id"] if trial_ledger is not None else None,
-            global_provider=global_provider, treasury_fallback=treasury_fallback))
+            global_provider=global_provider, treasury_fallback=treasury_fallback,
+            fundamental_provider=fundamental_provider))
         evidence_time = _presend_evidence_time(result, private_state_dir, scheduled, last_sample)
         # Sample after the last persistence read: even local I/O can outlive
         # the slot, and the send must not use a pre-read clock sample.
@@ -349,7 +356,7 @@ def _run_scheduled_reminder(notifier, task_id, clock=None):
 
 
 def register_default_jobs(target_scheduler=None, codes=None, collector=None, notifier=None, private_state_dir=None,
-                          global_provider=None, treasury_fallback=None):
+                          global_provider=None, treasury_fallback=None, fundamental_provider=None):
     """Register the five weekday portfolio reports on an APScheduler instance.
 
     The legacy codes and collector arguments remain accepted for compatibility;
@@ -360,21 +367,24 @@ def register_default_jobs(target_scheduler=None, codes=None, collector=None, not
         _run_scheduled_portfolio_report, 1800, private_state_dir, None,
         None,
         global_provider, treasury_fallback,
+        fundamental_provider=fundamental_provider,
     )
 
 
 def register_four_stage_jobs(target_scheduler=None, notifier=None, *, private_state_dir=None, clock=None, live_ledger=None,
-                             global_provider=None, treasury_fallback=None):
+                             global_provider=None, treasury_fallback=None, fundamental_provider=None):
     """Opt-in four-stage cadence; weekdays are not a verified trading calendar."""
     return _register_report_jobs(
         target_scheduler, notifier, FOUR_STAGE_SCHEDULES, _run_four_stage_report,
         int(MAX_STAGE_DELAY.total_seconds()), private_state_dir, clock, live_ledger,
         global_provider, treasury_fallback,
+        fundamental_provider=fundamental_provider,
     )
 
 
 def _register_report_jobs(target_scheduler, notifier, schedules, callback, grace, private_state_dir, clock,
-                          live_ledger=None, global_provider=None, treasury_fallback=None):
+                          live_ledger=None, global_provider=None, treasury_fallback=None,
+                          fundamental_provider=None):
     require_private_execution()
     if clock is not None and not callable(clock):
         raise ValueError("schedule clock must be callable")
@@ -392,6 +402,8 @@ def _register_report_jobs(target_scheduler, notifier, schedules, callback, grace
     if global_provider is not None or treasury_fallback is not None:
         options["global_provider"] = global_provider
         options["treasury_fallback"] = treasury_fallback
+    if fundamental_provider is not None:
+        options["fundamental_provider"] = fundamental_provider
     target_scheduler = scheduler if target_scheduler is None else target_scheduler
     notifier = FeishuNotifier() if notifier is None else notifier
     for job_id, report_title, hour, minute, report_kind in schedules:
@@ -454,7 +466,7 @@ def register_reminder_jobs(target_scheduler=None, notifier=None, clock=None):
 
 
 def start_scheduler(codes=None, *, profile="legacy", private_state_dir=None, live_ledger=None,
-                    global_provider=None, treasury_fallback=None):
+                    global_provider=None, treasury_fallback=None, fundamental_provider=None):
     """Start an explicit reminder profile; this is not ChatGPT Tasks."""
     if type(profile) is not str or profile not in ("legacy", "four-stage", "full-day"):
         raise ValueError("unsupported scheduler profile")
@@ -473,8 +485,11 @@ def start_scheduler(codes=None, *, profile="legacy", private_state_dir=None, liv
         global_provider = default_global if global_provider is None else global_provider
         treasury_fallback = default_treasury if treasury_fallback is None else treasury_fallback
     if profile != "full-day":
+        if fundamental_provider is None:
+            fundamental_provider = create_fundamental_provider()
         options["global_provider"] = global_provider
         options["treasury_fallback"] = treasury_fallback
+        options["fundamental_provider"] = fundamental_provider
     if profile == "legacy":
         register_default_jobs(codes=codes, **options)
     elif profile == "four-stage":

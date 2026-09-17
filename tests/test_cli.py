@@ -145,17 +145,27 @@ class CliTests(unittest.TestCase):
             "exposure": MappingProxyType({"CN": Decimal("0.7500")}),
         }
         output = StringIO()
+        sentinel_fundamental = object()
 
         with patch("app.main.FeishuNotifier", create=True) as notifier_type, patch(
             "app.main.run_portfolio_report", create=True, return_value=result
-        ) as run_report, redirect_stdout(output):
+        ) as run_report, patch(
+            "app.main.create_fundamental_provider", return_value=sentinel_fundamental
+        ) as create_fundamental, redirect_stdout(output):
             exit_code = main_module.main(
                 ["--portfolio", "--report-kind", "closing", "--no-notify"]
             )
 
         self.assertEqual(exit_code, 0)
         notifier_type.assert_not_called()
-        run_report.assert_called_once_with(report_kind="closing", notifier=None)
+        create_fundamental.assert_called_once_with()
+        run_report.assert_called_once_with(
+            report_kind="closing",
+            notifier=None,
+            fundamental_provider=sentinel_fundamental,
+        )
+        self.assertNotIn("global_provider", run_report.call_args.kwargs)
+        self.assertNotIn("treasury_fallback", run_report.call_args.kwargs)
         parsed = json.loads(output.getvalue())
         self.assertEqual(parsed["amount"], "4321.09")
         self.assertEqual(parsed["as_of"], "2026-09-11T15:30:00+00:00")

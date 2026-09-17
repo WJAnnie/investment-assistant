@@ -299,19 +299,31 @@ class CliWiringTests(unittest.TestCase):
         from contextlib import redirect_stdout
         from io import StringIO
 
+        sentinel_fundamental = object()
         with patch.object(cli, "load_dotenv"), patch.object(
             cli, "run_portfolio_report", return_value={"status": "completed"}
         ) as report, patch(
             "app.main.create_global_market_providers",
             return_value=_sentinel_providers(),
-        ) as factory, redirect_stdout(StringIO()):
+        ) as factory, patch(
+            "app.main.create_fundamental_provider",
+            return_value=sentinel_fundamental,
+        ) as fundamental_factory, redirect_stdout(StringIO()):
             exit_code = cli.main(["--portfolio", "--report-kind", "closing", "--no-notify"])
 
         self.assertEqual(exit_code, 0)
         factory.assert_not_called()
+        fundamental_factory.assert_called_once_with()
         self.assertEqual(
-            report.call_args.kwargs, {"report_kind": "closing", "notifier": None}
+            report.call_args.kwargs,
+            {
+                "report_kind": "closing",
+                "notifier": None,
+                "fundamental_provider": sentinel_fundamental,
+            },
         )
+        self.assertNotIn("global_provider", report.call_args.kwargs)
+        self.assertNotIn("treasury_fallback", report.call_args.kwargs)
 
     def test_portfolio_result_remains_json_serializable_with_providers(self):
         from contextlib import redirect_stdout

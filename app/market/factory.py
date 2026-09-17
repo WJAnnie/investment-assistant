@@ -3,12 +3,18 @@ import os
 from .akshare import AkShareProvider
 from .collector import MarketCollector
 from .fund_nav import AkShareFundNavProvider
+from .fundamentals import AkShareStockEvidenceProvider
 from .global_markets import FredTreasuryProvider, YahooGlobalMarketProvider
 from .hk_index import AkShareHKIndexProvider
 from .sina import SinaProvider
 from .tencent import TencentHistoryProvider
 from .tushare import TushareProvider
 from app.portfolio.valuation import PortfolioValuationRouter
+
+
+def create_fundamental_provider():
+    """Create the stock fundamental/valuation provider without any request."""
+    return AkShareStockEvidenceProvider()
 
 
 def create_global_market_providers(session=None):
