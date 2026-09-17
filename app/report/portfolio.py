@@ -165,6 +165,9 @@ def _format_account(account_snapshot, report_kind, analysis_map=None):
         analysis_item = (analysis_map or {}).get((account.account_id, holding.holding.code))
         if analysis_item is not None and report_kind != "midday":
             lines.append(_format_analysis_item(analysis_item))
+            fund_text = _format_fundamental_item(analysis_item)
+            if fund_text:
+                lines.append(fund_text)
             minute_text = _format_minute_context(analysis_item)
             if minute_text:
                 lines.append(minute_text)
@@ -319,6 +322,41 @@ def _analysis_map(analysis):
         (item.get("account_id"), item.get("code")): item
         for item in analysis.get("items", ())
     }
+
+
+def _format_metric_number(val) -> str:
+    if val is None or isinstance(val, bool):
+        return "暂无"
+    try:
+        if isinstance(val, float) and not math.isfinite(val):
+            return "暂无"
+        d = Decimal(str(val))
+        if not d.is_finite():
+            return "暂无"
+        s = format(d, "f")
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s
+    except Exception:
+        return "暂无"
+
+
+def _format_fundamental_item(item) -> str:
+    if not isinstance(item, Mapping):
+        return ""
+    fund = item.get("fundamental")
+    if not isinstance(fund, Mapping):
+        return ""
+    raw_status = fund.get("status")
+    status_str = str(getattr(raw_status, "value", raw_status) or "").upper()
+    if status_str == "READY" or status_str.endswith(".READY"):
+        roe_val = fund.get("roe_pct") if "roe_pct" in fund else fund.get("roe")
+        pe_val = fund.get("pe_ttm") if "pe_ttm" in fund else fund.get("pe")
+        roe_str = _format_metric_number(roe_val)
+        pe_str = _format_metric_number(pe_val)
+        suffix = "满足标准。" if fund.get("criterion_passed") is True else "未满足标准。"
+        return f"基本面：已校验；ROE {roe_str}%；PE(TTM) {pe_str}；{suffix}"
+    return "基本面：该标的未通过校验，不生成基本面结论。"
 
 
 def _format_analysis_item(item):

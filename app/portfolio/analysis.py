@@ -72,6 +72,13 @@ def _is_supported_a_share(code, market, instrument_type) -> bool:
 def _finite_metric(val):
     if val is None or isinstance(val, bool):
         return None
+    if type(val).__module__ == "numpy" and hasattr(val, "item"):
+        try:
+            val = val.item()
+        except Exception:
+            return None
+        if isinstance(val, bool):
+            return None
     if isinstance(val, (int, float, Decimal)):
         if isinstance(val, float) and not isfinite(val):
             return None
@@ -79,6 +86,7 @@ def _finite_metric(val):
             return None
         return val
     return None
+
 
 
 def _evaluate_stock_fundamental(provider, code: str, current_time: datetime) -> dict:

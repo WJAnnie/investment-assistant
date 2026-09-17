@@ -23,4 +23,12 @@ def to_jsonable(value):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
         return [to_jsonable(item) for item in value]
+    if type(value).__module__ == "numpy" and hasattr(value, "item"):
+        try:
+            value = value.item()
+        except Exception:
+            pass
+    if isinstance(value, Decimal):
+        return str(value)
     return value
+

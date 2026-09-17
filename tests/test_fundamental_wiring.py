@@ -580,6 +580,7 @@ class TestFundamentalWiring(unittest.TestCase):
         expected_snippet = "基本面：已接入经校验的财报/估值数据源（1/1 个 A 股持仓通过校验，1 个满足基本面标准）。"
         self.assertIn(expected_snippet, report)
         self.assertNotIn("基本面：未接入经校验的财报/估值数据源", report)
+        self.assertIn("基本面：已校验；ROE 15%；PE(TTM) 20；满足标准。", report)
 
         for forbidden in FORBIDDEN_REPORT_TOKENS:
             with self.subTest(forbidden=forbidden):
@@ -702,6 +703,89 @@ class TestFundamentalWiring(unittest.TestCase):
         sig = inspect.signature(run_portfolio_report)
         self.assertIn("fundamental_provider", sig.parameters)
         self.assertIsNone(sig.parameters["fundamental_provider"].default)
+
+    def test_to_jsonable_coerces_numpy_scalars(self):
+        import numpy as np
+
+        res_int = to_jsonable(np.int64(3))
+        self.assertEqual(res_int, 3)
+        self.assertIs(type(res_int), int)
+
+        self.assertIs(to_jsonable(np.bool_(True)), True)
+
+        res_float = to_jsonable(np.float64(1.5))
+        self.assertEqual(res_float, 1.5)
+
+        dumped = json.dumps(to_jsonable({"a": np.int64(3), "b": np.bool_(False)}), allow_nan=False)
+        self.assertEqual(json.loads(dumped), {"a": 3, "b": False})
+
+        self.assertEqual(to_jsonable(Decimal("12.5")), "12.5")
+
+    def test_finite_metric_coerces_numpy_int(self):
+        import numpy as np
+        from app.portfolio.analysis import _finite_metric
+
+        res_int = _finite_metric(np.int64(12))
+        self.assertEqual(res_int, 12)
+        self.assertIs(type(res_int), int)
+
+        self.assertEqual(_finite_metric(np.float64(12.5)), 12.5)
+        self.assertEqual(_finite_metric(Decimal("12.5")), Decimal("12.5"))
+        self.assertIsNone(_finite_metric(True))
+        self.assertIsNone(_finite_metric(np.bool_(True)))
+
+    def test_report_per_holding_fundamental_not_ready_and_etf_skipped(self):
+        h_stock = _make_holding_config("600977")
+        h_etf = _make_holding_config("159500", instrument_type="etf")
+        cfg, snapshot = _make_portfolio_and_snapshot([h_stock, h_etf])
+        provider = FakeStockEvidenceProvider(error=RuntimeError("x"))
+
+        analysis = analyze_portfolio(cfg, snapshot, now=EVAL_TIME, fundamental_provider=provider)
+        report = format_portfolio_report(snapshot, "morning", EVAL_TIME, analysis=analysis)
+
+        not_ready_line = "基本面：该标的未通过校验，不生成基本面结论。"
+        self.assertIn(not_ready_line, report)
+        self.assertIn("基本面：未接入经校验的财报/估值数据源，不生成基本面结论。", report)
+        self.assertNotIn("已接入经校验的财报", report)
+
+        self.assertEqual(report.count(not_ready_line), 1)
+        report_lines = report.splitlines()
+        for idx, line in enumerate(report_lines):
+            if "159500" in line and idx + 1 < len(report_lines):
+                self.assertNotIn("基本面：", report_lines[idx + 1])
+
+        for forbidden in FORBIDDEN_REPORT_TOKENS:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, report)
+
+    def test_report_per_holding_fundamental_not_passed(self):
+        h1 = _make_holding_config("600977")
+        h2 = _make_holding_config("601288")
+        cfg, snapshot = _make_portfolio_and_snapshot([h1, h2])
+
+        provider = FakeStockEvidenceProvider(
+            mapping={
+                "600977": FakeStockEvidence(
+                    fundamental=make_fundamental_obs("600977", EVAL_TIME, roe=Decimal("15")),
+                    valuation=make_valuation_obs("600977", EVAL_TIME, pe=Decimal("20")),
+                ),
+                "601288": FakeStockEvidence(
+                    fundamental=make_fundamental_obs("601288", EVAL_TIME, roe=Decimal("15")),
+                    valuation=make_valuation_obs("601288", EVAL_TIME, pe=Decimal("80")),
+                ),
+            }
+        )
+
+        analysis = analyze_portfolio(cfg, snapshot, now=EVAL_TIME, fundamental_provider=provider)
+        report = format_portfolio_report(snapshot, "morning", EVAL_TIME, analysis=analysis)
+
+        self.assertIn("基本面：已接入经校验的财报/估值数据源（2/2 个 A 股持仓通过校验，1 个满足基本面标准）。", report)
+        self.assertIn("满足标准。", report)
+        self.assertIn("未满足标准。", report)
+        for forbidden in FORBIDDEN_REPORT_TOKENS:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, report)
+
 
 
 if __name__ == "__main__":
