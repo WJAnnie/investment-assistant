@@ -1453,3 +1453,109 @@ def test_list_convergence_retry_empty_preserves_data_within_sweep():
     timestamps = {r["数据时间"] for r in records}
     assert len(timestamps) == 2
 
+
+def test_list_request_url_uses_stable_sort_key():
+    session = FakeSession(body=json.dumps({"rc": 0, "data": {"diff": []}}))
+    client = EastMoneyBoardClient(session=session)
+    client.stock_board_industry_name_em()
+    assert len(session.calls) >= 1
+    url = session.calls[0]["url"]
+    assert "fid=f12" in url
+    assert "fid=f3" not in url
+
+
+def test_list_pagination_integrity_no_loss_no_dup():
+    page1_rows = [
+        {
+            "f12": f"BK{i:04d}",
+            "f14": f"行业{i}",
+            "f3": 1.0,
+            "f8": 1.0,
+            "f104": 10,
+            "f105": 10,
+            "f109": 1.0,
+            "f110": 1.0,
+            "f124": F124,
+        }
+        for i in range(1, 101)
+    ]
+    page2_rows = [
+        {
+            "f12": f"BK{i:04d}",
+            "f14": f"行业{i}",
+            "f3": 1.0,
+            "f8": 1.0,
+            "f104": 10,
+            "f105": 10,
+            "f109": 1.0,
+            "f110": 1.0,
+            "f124": F124,
+        }
+        for i in range(101, 201)
+    ]
+    page3_rows = [
+        {
+            "f12": f"BK{i:04d}",
+            "f14": f"行业{i}",
+            "f3": 1.0,
+            "f8": 1.0,
+            "f104": 10,
+            "f105": 10,
+            "f109": 1.0,
+            "f110": 1.0,
+            "f124": F124,
+        }
+        for i in range(201, 251)
+    ]
+    empty_page = {"rc": 0, "data": {"diff": []}}
+    responses = [
+        json.dumps({"rc": 0, "data": {"diff": page1_rows}}),
+        json.dumps({"rc": 0, "data": {"diff": page2_rows}}),
+        json.dumps({"rc": 0, "data": {"diff": page3_rows}}),
+        json.dumps(empty_page),
+    ]
+    session = FakeSession(responses=responses)
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == 250
+    assert len({r["板块代码"] for r in records}) == 250
+    assert len(records) == len({r["板块代码"] for r in records}) == 250
+
+
+def test_list_pagination_all_boards_reachable_via_stable_key():
+    from app.market.board_http import _MAX_PAGES
+
+    responses = [
+        json.dumps({
+            "rc": 0,
+            "data": {
+                "diff": [
+                    {
+                        "f12": f"BK{i:04d}",
+                        "f14": f"行业{i}",
+                        "f3": 1.0,
+                        "f8": 1.0,
+                        "f104": 10,
+                        "f105": 10,
+                        "f109": 1.0,
+                        "f110": 1.0,
+                        "f124": F124,
+                    }
+                ]
+            },
+        })
+        for i in range(1, _MAX_PAGES + 1)
+    ]
+    session = FakeSession(responses=responses)
+    client = EastMoneyBoardClient(session=session)
+    records = client.stock_board_industry_name_em().to_dict(orient="records")
+
+    assert len(records) == _MAX_PAGES
+    assert len(session.calls) == _MAX_PAGES
+    assert _MAX_PAGES == 8
+    for call in session.calls:
+        assert "fid=f12" in call["url"]
+        assert "fid=f3" not in call["url"]
+
+

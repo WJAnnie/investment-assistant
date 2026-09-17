@@ -161,9 +161,10 @@ class EastMoneyBoardClient(_BoundedHttpProvider):
         self._max_sweeps = max_sweeps
 
     def _fetch_page(self, page: int) -> list[dict[str, Any]] | None:
+        # fid 决定服务端排序，盘中行序漂移会导致翻页重复/丢行，故必须用稳定唯一键 f12；返回结果由调用方 rank_industries 重新排序，与 fid 无关
         url = (
             f"{_LIST_BASE_URL}?pn={page}&pz=100&po=1&np=1&fltt=2&invt=2"
-            f"&fid=f3&fs=m:90+t:2&fields=f12,f14,f3,f8,f104,f105,f109,f110,f124"
+            f"&fid=f12&fs=m:90+t:2&fields=f12,f14,f3,f8,f104,f105,f109,f110,f124"
         )
         raw_bytes = self._get(url, None)
         payload = _decode_json(raw_bytes)
