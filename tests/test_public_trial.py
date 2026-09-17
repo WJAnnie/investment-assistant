@@ -796,13 +796,15 @@ class ValidationTests(unittest.TestCase):
     def test_rendered_report_humanizes_runtime_metadata_for_notifications(self):
         rendered = trial.render_report(manual())
 
-        self.assertIn("北京时间：2026年9月14日 09:01", rendered)
-        self.assertIn("本次模式：手动演练", rendered)
-        self.assertIn("国内指数状态：公开行情已获取，来源时间待核验", rendered)
+        self.assertIn("更新于 2026年9月14日 09:01（北京时间）", rendered)
+        self.assertIn("本次为手动演练", rendered)
+        self.assertIn("国内指数：公开行情已获取，来源时间待核验", rendered)
         self.assertIn("【当前建议】", rendered)
         self.assertIn("WAIT｜暂不操作", rendered)
         self.assertIn("【风险说明】", rendered)
         self.assertNotIn("#", rendered)
+        self.assertNotIn("本次模式：", rendered)
+        self.assertNotIn("国内指数状态：", rendered)
         for internal_value in ("manual_replay", "available_unverified", "sina_public"):
             with self.subTest(internal_value=internal_value):
                 self.assertNotIn(internal_value, rendered)
@@ -810,7 +812,7 @@ class ValidationTests(unittest.TestCase):
     def test_rendered_report_humanizes_scheduled_timing_status(self):
         rendered = trial.render_report(build("morning", minutes=20, after=1))
 
-        self.assertIn("本次模式：定时演练（延迟完成）", rendered)
+        self.assertIn("本次为定时演练（延迟完成）", rendered)
         self.assertNotIn("scheduled", rendered)
         self.assertNotIn("late", rendered)
 

@@ -633,9 +633,9 @@ def render_report(payload):
         timing = f'定时演练（{timing}）'
     lines = [
         f"🔔 {STAGES[stage]} {_TITLES[stage]}", '',
-        f"北京时间：{report_time}",
-        f"国内指数状态：{_MARKET_LABELS[payload['market']['status']]}",
-        f"本次模式：{timing}", '',
+        f"更新于 {report_time}（北京时间）",
+        f"国内指数：{_MARKET_LABELS[payload['market']['status']]}",
+        f"本次为{timing}", '',
     ]
     if stage == 'morning':
         lines += _render_global_market(payload)
