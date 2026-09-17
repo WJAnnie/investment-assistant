@@ -10,6 +10,7 @@ from app.market.factory import (
     create_default_collector,
     create_fundamental_provider,
     create_global_market_providers,
+    create_minute_snapshot_loader,
 )
 from app.market.collector import MarketCollector
 from app.market.sina import SinaProvider
@@ -225,6 +226,9 @@ def main(argv=None):
         # Fundamental/valuation evidence is consumed in every analysis stage
         # (unlike overnight global market data), and provider construction performs no I/O.
         private_options["fundamental_provider"] = create_fundamental_provider()
+        # Minute snapshot evidence is consumed across portfolio stages without
+        # performing network requests during loader construction.
+        private_options["minute_snapshot_loader"] = create_minute_snapshot_loader()
         result = run_portfolio_report(
             report_kind=args.report_kind,
             notifier=notifier,

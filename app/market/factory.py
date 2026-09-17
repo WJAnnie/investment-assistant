@@ -6,6 +6,7 @@ from .fund_nav import AkShareFundNavProvider
 from .fundamentals import AkShareStockEvidenceProvider
 from .global_markets import FredTreasuryProvider, YahooGlobalMarketProvider
 from .hk_index import AkShareHKIndexProvider
+from .minute.eastmoney import create_minute_snapshot_loader
 from .sina import SinaProvider
 from .tencent import TencentHistoryProvider
 from .tushare import TushareProvider

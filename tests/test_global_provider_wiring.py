@@ -300,6 +300,7 @@ class CliWiringTests(unittest.TestCase):
         from io import StringIO
 
         sentinel_fundamental = object()
+        sentinel_minute = object()
         with patch.object(cli, "load_dotenv"), patch.object(
             cli, "run_portfolio_report", return_value={"status": "completed"}
         ) as report, patch(
@@ -308,18 +309,23 @@ class CliWiringTests(unittest.TestCase):
         ) as factory, patch(
             "app.main.create_fundamental_provider",
             return_value=sentinel_fundamental,
-        ) as fundamental_factory, redirect_stdout(StringIO()):
+        ) as fundamental_factory, patch(
+            "app.main.create_minute_snapshot_loader",
+            return_value=sentinel_minute,
+        ) as minute_factory, redirect_stdout(StringIO()):
             exit_code = cli.main(["--portfolio", "--report-kind", "closing", "--no-notify"])
 
         self.assertEqual(exit_code, 0)
         factory.assert_not_called()
         fundamental_factory.assert_called_once_with()
+        minute_factory.assert_called_once_with()
         self.assertEqual(
             report.call_args.kwargs,
             {
                 "report_kind": "closing",
                 "notifier": None,
                 "fundamental_provider": sentinel_fundamental,
+                "minute_snapshot_loader": sentinel_minute,
             },
         )
         self.assertNotIn("global_provider", report.call_args.kwargs)
