@@ -949,8 +949,8 @@ class TestAkShareIndustryProvider:
         assert res.observations[0].as_of == expected_dt
         assert res.observations[1].as_of == expected_dt
 
-    # 39. 两行具有不同的"数据时间"：触发冲突，0条观测且所有代码均标记为 ERROR_DATE_MISMATCH
-    def test_fetch_conflicting_data_times_fails_batch(self) -> None:
+    # 39. 两行具有窗口内不同的"数据时间"（28s 差异 <= 240s）：归一化为窗口终点，产生2条观测，errors为空
+    def test_fetch_in_window_data_times_normalized_to_window_end(self) -> None:
         m_date = date(2026, 9, 17)
         records = [
             {
@@ -974,6 +974,45 @@ class TestAkShareIndustryProvider:
                 "近5日涨跌幅": 0.5,
                 "近20日涨跌幅": 2.0,
                 "数据时间": "2026-09-17T15:40:00+08:00",
+            },
+        ]
+        client = MockAkShareClient(board_names=FakeDataFrame(records))
+        clock_dt = datetime(2026, 9, 17, 16, 0, tzinfo=SHANGHAI_TZ)
+        provider = AkShareIndustryProvider(client=client, clock=lambda: clock_dt)
+        cutoff = datetime(2026, 9, 17, 17, 0, tzinfo=SHANGHAI_TZ)
+        res = provider.fetch(cutoff=cutoff, market_date=m_date)
+
+        assert len(res.observations) == 2
+        assert len(res.errors) == 0
+        expected_as_of = datetime(2026, 9, 17, 15, 40, 0, tzinfo=SHANGHAI_TZ)
+        assert res.observations[0].as_of == expected_as_of
+        assert res.observations[1].as_of == expected_as_of
+
+    # 39b. 跨度超过窗口阈值（6分钟，360s > 240s）：触发冲突，0条观测且所有代码均标记为 ERROR_DATE_MISMATCH
+    def test_fetch_out_of_window_data_times_fails_batch(self) -> None:
+        m_date = date(2026, 9, 17)
+        records = [
+            {
+                "板块代码": "BK0420",
+                "板块名称": "半导体",
+                "涨跌幅": 2.5,
+                "换手率": 3.1,
+                "上涨家数": 80,
+                "下跌家数": 20,
+                "近5日涨跌幅": 1.25,
+                "近20日涨跌幅": 4.56,
+                "数据时间": "2026-09-17T15:39:32+08:00",
+            },
+            {
+                "板块代码": "BK0425",
+                "板块名称": "互联网服务",
+                "涨跌幅": 1.2,
+                "换手率": 2.0,
+                "上涨家数": 50,
+                "下跌家数": 30,
+                "近5日涨跌幅": 0.5,
+                "近20日涨跌幅": 2.0,
+                "数据时间": "2026-09-17T15:45:32+08:00",
             },
         ]
         client = MockAkShareClient(board_names=FakeDataFrame(records))

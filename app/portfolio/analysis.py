@@ -361,7 +361,7 @@ def analyze_portfolio(
         }
     if industry_provider is not None:
         if ranking is not None:
-            payload["industry_ranking"] = {
+            ranking_payload = {
                 "status": ranking.stamp.status.value,
                 "reason_code": ranking.stamp.reason_code,
                 "as_of": ranking.stamp.as_of.isoformat(),
@@ -377,6 +377,26 @@ def analyze_portfolio(
                     for it in ranking.items
                 ),
             }
+            if fetch_result is not None:
+                start_val = (
+                    getattr(fetch_result, "as_of_start", None)
+                    if not isinstance(fetch_result, Mapping)
+                    else fetch_result.get("as_of_start")
+                )
+                end_val = (
+                    getattr(fetch_result, "as_of_end", None)
+                    if not isinstance(fetch_result, Mapping)
+                    else fetch_result.get("as_of_end")
+                )
+                if start_val is not None:
+                    ranking_payload["as_of_start"] = (
+                        start_val.isoformat() if hasattr(start_val, "isoformat") else str(start_val)
+                    )
+                if end_val is not None:
+                    ranking_payload["as_of_end"] = (
+                        end_val.isoformat() if hasattr(end_val, "isoformat") else str(end_val)
+                    )
+            payload["industry_ranking"] = ranking_payload
         else:
             payload["industry_ranking"] = {
                 "status": "not_available",

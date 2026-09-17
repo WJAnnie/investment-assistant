@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 import math
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.portfolio.global_market import format_overnight_lines
 from app.utils.redaction import redact_secrets
@@ -489,6 +491,25 @@ def _format_benchmark_analysis(item):
     )
 
 
+def _parse_optional_datetime(val: Any) -> datetime | None:
+    if isinstance(val, datetime):
+        if val.tzinfo is None or val.tzinfo.utcoffset(val) is None:
+            return val.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        return val.astimezone(ZoneInfo("Asia/Shanghai"))
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        try:
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                return dt.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            return dt.astimezone(ZoneInfo("Asia/Shanghai"))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 def _format_research_status(analysis, report_kind, global_market=None):
     coverage = (analysis or {}).get("coverage", {})
     limits = (analysis or {}).get("data_limits") or {}
@@ -543,6 +564,15 @@ def _format_research_status(analysis, report_kind, global_market=None):
         industry_lines = [
             f"行业排序：已接入经校验的行业数据（截至 {as_of_date}，共 {coverage_val} 个板块参与横向比较）。"
         ]
+        start_raw = industry_ranking_data.get("as_of_start")
+        end_raw = industry_ranking_data.get("as_of_end")
+        dt_start = _parse_optional_datetime(start_raw)
+        dt_end = _parse_optional_datetime(end_raw)
+        if dt_start is not None and dt_end is not None:
+            if dt_start != dt_end and dt_start.date() == dt_end.date():
+                industry_lines.append(
+                    f"数据时间：{dt_start.strftime('%m-%d %H:%M')}–{dt_end.strftime('%H:%M')}（截面窗口）"
+                )
         for rank_val, name_val, score_float in valid_items[:10]:
             industry_lines.append(f"  {rank_val}. {name_val} {score_float:.1f}")
         industry_lines.append(

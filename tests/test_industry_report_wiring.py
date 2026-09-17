@@ -90,19 +90,27 @@ MANDATORY_PHRASES = (
 @dataclass(frozen=True)
 class FakeIndustryFetch:
     observations: tuple[IndustryObservation, ...]
+    as_of_start: datetime | None = None
+    as_of_end: datetime | None = None
 
 
 class FakeIndustryProvider:
-    def __init__(self, observations=None, error=None):
+    def __init__(self, observations=None, error=None, as_of_start=None, as_of_end=None):
         self.observations = tuple(observations) if observations is not None else None
         self.error = error
+        self.as_of_start = as_of_start
+        self.as_of_end = as_of_end
         self.fetch_calls = []
 
     def fetch(self, cutoff, market_date):
         self.fetch_calls.append({"cutoff": cutoff, "market_date": market_date})
         if self.error is not None:
             raise self.error
-        return FakeIndustryFetch(observations=self.observations or ())
+        return FakeIndustryFetch(
+            observations=self.observations or (),
+            as_of_start=self.as_of_start,
+            as_of_end=self.as_of_end,
+        )
 
 
 def _build_observations(count=10, as_of=None, source="test_source"):
@@ -421,6 +429,33 @@ class IndustryReportFormattingTests(unittest.TestCase):
 
         self.assertIn("  1. 有效板块 88.0", report)
         self.assertNotIn("无效板块", report)
+
+    def test_report_window_rendering(self):
+        snap = _report_snapshot()
+        t_start = datetime(2026, 9, 17, 15, 39, 32, tzinfo=SHANGHAI_TZ)
+        t_end = datetime(2026, 9, 17, 15, 40, 0, tzinfo=SHANGHAI_TZ)
+        analysis = {
+            "coverage": {"ready": 2, "total": 2, "unavailable": 0},
+            "data_limits": {"industry": "available"},
+            "industry_ranking": {
+                "status": "READY",
+                "as_of": t_end.isoformat(),
+                "as_of_start": t_start.isoformat(),
+                "as_of_end": t_end.isoformat(),
+                "coverage": 2,
+                "items": (
+                    {"code": "BK0420", "name": "半导体", "rank": 1, "score": 85.0},
+                    {"code": "BK0425", "name": "互联网服务", "rank": 2, "score": 70.0},
+                ),
+            },
+        }
+
+        report = format_portfolio_report(snap, "morning", MONDAY_MORNING, analysis=analysis)
+
+        self.assertIn("（截面窗口）", report)
+        self.assertIn("数据时间：09-17 15:39–15:40（截面窗口）", report)
+        for token in ("None", "error_code", "provider"):
+            self.assertNotIn(token, report)
 
     def test_morning_and_global_compliance_redlines(self):
         snap = _report_snapshot()

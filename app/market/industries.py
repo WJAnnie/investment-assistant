@@ -30,6 +30,7 @@ VALID_ERROR_CODES = frozenset({
 })
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+MAX_CROSS_SECTION_WINDOW = timedelta(seconds=240)
 
 ALIASES: dict[str, tuple[str, ...]] = {
     "code": ("板块代码", "代码", "code", "symbol", "secucode"),
@@ -168,6 +169,8 @@ class IndustryFetch:
     observations: tuple[IndustryObservation, ...]
     errors: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     truncated: bool = False
+    as_of_start: datetime | None = None
+    as_of_end: datetime | None = None
 
     def __post_init__(self) -> None:
         if type(self.observations) is not tuple:
@@ -197,6 +200,11 @@ class IndustryFetch:
 
         if type(self.truncated) is not bool:
             raise TypeError("truncated must be a boolean")
+
+        if self.as_of_start is not None and not isinstance(self.as_of_start, datetime):
+            raise TypeError("as_of_start must be a datetime instance or None")
+        if self.as_of_end is not None and not isinstance(self.as_of_end, datetime):
+            raise TypeError("as_of_end must be a datetime instance or None")
 
         if self.observations:
             first_as_of = self.observations[0].as_of
@@ -322,13 +330,16 @@ class AkShareIndustryProvider:
         if not present:
             batch_as_of = datetime.combine(market_date, time(15, 0), tzinfo=SHANGHAI_TZ)
             stamp_conflict = False
+            window_start = None
+            window_end = None
         else:
-            if len(set(present)) != 1:
-                stamp_conflict = True
-                batch_as_of = max(present)
-            else:
+            window_start = min(present)
+            window_end = max(present)
+            batch_as_of = window_end
+            if window_end - window_start <= MAX_CROSS_SECTION_WINDOW:
                 stamp_conflict = False
-                batch_as_of = present[0]
+            else:
+                stamp_conflict = True
 
         observations: list[IndustryObservation] = []
         errors: dict[str, str] = {}
@@ -361,7 +372,11 @@ class AkShareIndustryProvider:
                 except ValueError:
                     errors[code] = ERROR_DATE_MISMATCH
                     continue
-                if row_dt != batch_as_of:
+                if window_start is not None and window_end is not None:
+                    if not (window_start <= row_dt <= window_end):
+                        errors[code] = ERROR_DATE_MISMATCH
+                        continue
+                elif row_dt != batch_as_of:
                     errors[code] = ERROR_DATE_MISMATCH
                     continue
             elif present or (code in unparseable_codes):
@@ -525,6 +540,8 @@ class AkShareIndustryProvider:
             observations=tuple(observations),
             errors=errors,
             truncated=truncated,
+            as_of_start=window_start,
+            as_of_end=window_end,
         )
 
 
@@ -535,6 +552,7 @@ __all__ = [
     "ERROR_NO_USABLE_DATA",
     "ERROR_DATE_MISMATCH",
     "VALID_ERROR_CODES",
+    "MAX_CROSS_SECTION_WINDOW",
     "IndustryFetch",
     "AkShareIndustryProvider",
 ]
