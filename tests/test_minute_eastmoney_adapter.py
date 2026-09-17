@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from app.chan.models import KLine
 from app.market.global_markets import (
     GlobalMarketDataError,
+    ERROR_INSUFFICIENT,
     ERROR_MALFORMED,
     ERROR_SOURCE_ERROR,
     ERROR_NETWORK,
@@ -20,6 +21,7 @@ from app.market.global_markets import (
 from app.market.minute.context import MinuteSnapshot, load_minute_context
 from app.market.minute.eastmoney import (
     _secid,
+    _normalize_row,
     aggregate_to_5m,
     EastMoneyMinuteProvider,
     create_minute_snapshot_loader,
@@ -74,6 +76,37 @@ class EastMoneyAdapterTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     _secid(bad)  # type: ignore
+
+    def test_normalize_row_field_order_and_invariant(self):
+        """D1: _normalize_row invariant holds for str and list/tuple in API order."""
+        s1 = "2026-09-17 09:31,10.0,10.5,11.0,9.5,100,1000"
+        s2 = "2026-09-17 13:05,25.0,24.0,26.5,23.5,500"
+        for s in (s1, s2):
+            with self.subTest(s=s):
+                self.assertEqual(_normalize_row(s), _normalize_row(s.split(",")))
+                self.assertEqual(_normalize_row(s), _normalize_row(tuple(s.split(","))))
+
+        # When close and high are swapped such that high < close, raises ERROR_MALFORMED
+        # In API order (time, open, close, high, low, volume):
+        # Here open=10.0, close=12.0, high=11.0, low=9.0 -> high < close
+        swapped_str = "2026-09-17 09:31,10.0,12.0,11.0,9.0,100"
+        with self.assertRaises(GlobalMarketDataError) as ctx:
+            _normalize_row(swapped_str)
+        self.assertEqual(ctx.exception.code, ERROR_MALFORMED)
+
+        with self.assertRaises(GlobalMarketDataError) as ctx:
+            _normalize_row(swapped_str.split(","))
+        self.assertEqual(ctx.exception.code, ERROR_MALFORMED)
+
+        # Datetime item[0]: naive raises ValueError, aware succeeds
+        naive_dt = datetime(2026, 9, 17, 9, 31)
+        with self.assertRaises(ValueError):
+            _normalize_row([naive_dt, 10.0, 10.5, 11.0, 9.5, 100])
+
+        aware_dt = datetime(2026, 9, 17, 9, 31, tzinfo=SHANGHAI)
+        norm_aware = _normalize_row([aware_dt, 10.0, 10.5, 11.0, 9.5, 100])
+        self.assertEqual(norm_aware[0], aware_dt)
+        self.assertEqual(norm_aware[1:], (10.0, 11.0, 9.5, 10.5, 100.0))
 
     def test_aggregate_to_5m_ohlcv_and_partial_bucket_drop(self):
         """2. 5m aggregation calculation: correct OHLCV, drop partial buckets, validate malformed."""
@@ -213,8 +246,8 @@ class EastMoneyAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             provider.snapshot(bad_mode, now=now)
 
-    def test_market_closed_or_empty_klines_scene(self):
-        """5. Closed day or empty klines returns day.sessions=(), lines=()."""
+    def test_empty_klines_is_not_evidence_of_closure(self):
+        """5. Empty klines is not evidence of market closure; raises ERROR_INSUFFICIENT."""
         provider = EastMoneyMinuteProvider()
         now = datetime(2026, 9, 20, 10, 0, tzinfo=SHANGHAI)  # Sunday
         holding = _make_holding()
@@ -224,9 +257,30 @@ class EastMoneyAdapterTests(unittest.TestCase):
                 with unittest.mock.patch.object(
                     provider, "_get", return_value=json.dumps(empty_payload).encode("utf-8")
                 ):
-                    snap = provider.snapshot(holding, now=now)
-                self.assertEqual(snap.day.sessions, ())
-                self.assertEqual(snap.lines, ())
+                    with self.assertRaises(GlobalMarketDataError) as ctx:
+                        provider.snapshot(holding, now=now)
+                    self.assertEqual(ctx.exception.code, ERROR_INSUFFICIENT)
+
+    def test_weekend_stale_klines_raises_malformed(self):
+        """Weekend request returning previous trading day klines raises ERROR_MALFORMED."""
+        provider = EastMoneyMinuteProvider()
+        now = datetime(2026, 9, 19, 10, 0, tzinfo=SHANGHAI)  # Saturday
+        holding = _make_holding("600519")
+
+        # Previous trading day: 2026-09-18, 120 klines
+        cur_dt = datetime(2026, 9, 18, 9, 31, tzinfo=SHANGHAI)
+        stale_rows = []
+        for _ in range(120):
+            stale_rows.append(f"{cur_dt.strftime('%Y-%m-%d %H:%M')},10.0,10.5,11.0,9.5,100,1000")
+            cur_dt += timedelta(minutes=1)
+
+        api_data = {"rc": 0, "data": {"klines": stale_rows}}
+        with unittest.mock.patch.object(
+            provider, "_get", return_value=json.dumps(api_data).encode("utf-8")
+        ):
+            with self.assertRaises(GlobalMarketDataError) as ctx:
+                provider.snapshot(holding, now=now)
+            self.assertEqual(ctx.exception.code, ERROR_MALFORMED)
 
     def test_end_to_end_context_and_multi_cycle_confirm(self):
         """6. End-to-end integration: 48 5m bars into load_minute_context and _structure_evidence.

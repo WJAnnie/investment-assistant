@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from app.chan.models import KLine
 from app.market.board_http import _parse_finite_float
 from app.market.global_markets import (
+    ERROR_INSUFFICIENT,
     ERROR_MALFORMED,
     ERROR_SOURCE_ERROR,
     GlobalMarketDataError,
@@ -40,7 +41,11 @@ def _secid(code: str) -> str:
 
 
 def _normalize_row(item: Any) -> tuple[datetime, float, float, float, float, float]:
-    """Normalize input row to (dt_aware, open, high, low, close, volume)."""
+    """Normalize input row to (dt_aware, open, high, low, close, volume).
+
+    字符串与位置序列 (tuple/list) 都使用 API 顺序 (time, open, close, high, low, volume)；
+    需要 K线对象顺序时请传 KLine 对象（hasattr time, open, high, low, close, volume）。
+    """
     if isinstance(item, str):
         parts = item.split(",")
         if len(parts) < 6:
@@ -86,14 +91,21 @@ def _normalize_row(item: Any) -> tuple[datetime, float, float, float, float, flo
             raise GlobalMarketDataError(ERROR_MALFORMED)
         t = item[0]
         if isinstance(t, str):
-            t = datetime.fromisoformat(t)
-        if not isinstance(t, datetime) or t.tzinfo is None or t.utcoffset() is None:
+            try:
+                dt_naive = datetime.strptime(t.strip(), "%Y-%m-%d %H:%M")
+            except Exception:
+                raise GlobalMarketDataError(ERROR_MALFORMED)
+            dt_aware = dt_naive.replace(tzinfo=SHANGHAI)
+        elif isinstance(t, datetime):
+            if t.tzinfo is None or t.utcoffset() is None:
+                raise ValueError("time must be timezone-aware")
+            dt_aware = t.astimezone(SHANGHAI)
+        else:
             raise ValueError("time must be timezone-aware")
-        dt_aware = t.astimezone(SHANGHAI)
         o = _parse_finite_float(item[1])
-        h = _parse_finite_float(item[2])
-        l = _parse_finite_float(item[3])
-        c = _parse_finite_float(item[4])
+        c = _parse_finite_float(item[2])
+        h = _parse_finite_float(item[3])
+        l = _parse_finite_float(item[4])
         v = _parse_finite_float(item[5])
         if (
             o is None or c is None or h is None or l is None or v is None
@@ -279,10 +291,13 @@ class EastMoneyMinuteProvider(_BoundedHttpProvider):
         code = getattr(holding, "code", "")
         raw_klines = self.fetch_rows(code, now=shanghai_now)
 
+        if not raw_klines:
+            raise GlobalMarketDataError(ERROR_INSUFFICIENT)
+
         day = cn_trading_day(
             shanghai_now.date(),
-            is_open=bool(raw_klines),
-            source="eastmoney push2delay klt=1 presence",
+            is_open=True,
+            source="eastmoney push2delay klt=1 rows present",
         )
 
         lines = aggregate_to_5m(raw_klines, day=day, now=shanghai_now)
