@@ -1,0 +1,323 @@
+{
+  "schema_version": "public-trial/v3",
+  "data_classification": "public_market_and_synthetic_test",
+  "purpose": "delivery_test_not_investment_advice",
+  "stage": "morning",
+  "execution_mode": "scheduled",
+  "requested_at": "2026-09-18T13:40:47.788024+08:00",
+  "generated_at": "2026-09-18T13:40:50.040369+08:00",
+  "scheduled_for": "2026-09-18T09:00:00+08:00",
+  "timing_status": "late",
+  "coverage": {
+    "global_markets": "PUBLIC_OBSERVATIONS",
+    "industry_ranking": "PUBLIC_OBSERVATIONS",
+    "morning_baseline": "MISSING",
+    "multi_timeframe": "NOT_IMPLEMENTED",
+    "prediction_pairing": "MISSING",
+    "exchange_calendar": "NOT_IMPLEMENTED"
+  },
+  "synthetic_account": {
+    "id": "SIMULATED-ONLY",
+    "positions": [
+      {
+        "symbol": "DEMO_A",
+        "weight_pct": 10
+      },
+      {
+        "symbol": "DEMO_B",
+        "weight_pct": 5
+      }
+    ],
+    "cash_pct": 85
+  },
+  "decision": {
+    "action": "WAIT",
+    "position_change_pct": 0,
+    "score": null,
+    "manual_confirmation_required": true,
+    "auto_trade_enabled": false
+  },
+  "real_account_trial_day": false,
+  "market": {
+    "source": "sina_public",
+    "status": "available_unverified",
+    "quotes": [
+      {
+        "code": "SH.000001",
+        "name": "上证指数",
+        "price": 3912.4677,
+        "change_pct": 0.95,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SZ.399001",
+        "name": "深证成指",
+        "price": 13629.37,
+        "change_pct": 1.64,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SZ.399006",
+        "name": "创业板指",
+        "price": 3368.76,
+        "change_pct": 2.14,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000688",
+        "name": "科创50",
+        "price": 1655.2071,
+        "change_pct": 3.05,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000905",
+        "name": "中证500",
+        "price": 7790.3488,
+        "change_pct": 1.77,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000300",
+        "name": "沪深300",
+        "price": 4509.0354,
+        "change_pct": 1.1,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000016",
+        "name": "上证50",
+        "price": 2863.6794,
+        "change_pct": 0.68,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SZ.399005",
+        "name": "中小100",
+        "price": 8405.67,
+        "change_pct": 1.5,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      }
+    ]
+  },
+  "global_market": {
+    "status": "complete",
+    "quotes": [
+      {
+        "category": "us_equities",
+        "symbol": "^GSPC",
+        "name": "标普500",
+        "value": 7637.759765625,
+        "previous_value": 7551.81005859375,
+        "value_unit": "points",
+        "change": 1.138133856179846,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-17T20:34:50+00:00",
+        "session_date": "2026-09-17",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "us_equities",
+        "symbol": "^DJI",
+        "name": "道琼斯工业指数",
+        "value": 51778.0390625,
+        "previous_value": 51461.8984375,
+        "value_unit": "points",
+        "change": 0.6143197872576556,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-17T20:35:03+00:00",
+        "session_date": "2026-09-17",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "nasdaq",
+        "symbol": "^IXIC",
+        "name": "纳斯达克综合指数",
+        "value": 26418.30078125,
+        "previous_value": 25978.4296875,
+        "value_unit": "points",
+        "change": 1.6932166379619584,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-17T21:15:59+00:00",
+        "session_date": "2026-09-17",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "semiconductors",
+        "symbol": "^SOX",
+        "name": "费城半导体指数",
+        "value": 11599.490234375,
+        "previous_value": 11246.1103515625,
+        "value_unit": "points",
+        "change": 3.1422409327808376,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-17T21:15:59+00:00",
+        "session_date": "2026-09-17",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "us_treasury",
+        "symbol": "^TNX",
+        "name": "美国10年期国债收益率",
+        "value": 4.947000026702881,
+        "previous_value": 5.00600004196167,
+        "value_unit": "percent",
+        "change": -5.900001525878906,
+        "change_unit": "bp",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-17T18:59:54+00:00",
+        "session_date": "2026-09-17",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "usd",
+        "symbol": "DX-Y.NYB",
+        "name": "美元指数",
+        "value": 100.30500030517578,
+        "previous_value": 100.22000122070312,
+        "value_unit": "points",
+        "change": 0.08481249594627371,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-18T05:30:48+00:00",
+        "session_date": "2026-09-18",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "gold",
+        "symbol": "GC=F",
+        "name": "COMEX黄金",
+        "value": 4402.2998046875,
+        "previous_value": 4399.7001953125,
+        "value_unit": "usd_per_ounce",
+        "change": 0.0590860572220242,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-18T05:30:48+00:00",
+        "session_date": "2026-09-18",
+        "freshness": "RECENT",
+        "error_code": null
+      },
+      {
+        "category": "oil",
+        "symbol": "CL=F",
+        "name": "WTI原油",
+        "value": 100.98999786376953,
+        "previous_value": 101.91000366210938,
+        "value_unit": "usd_per_barrel",
+        "change": -0.9027629921299907,
+        "change_unit": "pct",
+        "source": "yahoo_chart",
+        "source_as_of": "2026-09-18T05:30:29+00:00",
+        "session_date": "2026-09-18",
+        "freshness": "RECENT",
+        "error_code": null
+      }
+    ]
+  },
+  "industries": {
+    "status": "READY",
+    "as_of": "2026-09-18T13:40:48+08:00",
+    "error": null,
+    "items": [
+      {
+        "rank": 1,
+        "code": "BK1341",
+        "name": "房产租赁经纪",
+        "score": 97.37878787878788,
+        "return_1d_pct": 4.06,
+        "return_5d_pct": 9.83,
+        "return_20d_pct": 20.03
+      },
+      {
+        "rank": 2,
+        "code": "BK1328",
+        "name": "集成电路封测",
+        "score": 96.0959595959596,
+        "return_1d_pct": 4.31,
+        "return_5d_pct": 10.0,
+        "return_20d_pct": 8.43
+      },
+      {
+        "rank": 3,
+        "code": "BK1599",
+        "name": "其他医疗服务",
+        "score": 95.0909090909091,
+        "return_1d_pct": 6.57,
+        "return_5d_pct": 11.04,
+        "return_20d_pct": 5.57
+      },
+      {
+        "rank": 4,
+        "code": "BK1355",
+        "name": "运动服装",
+        "score": 94.15656565656566,
+        "return_1d_pct": 2.9,
+        "return_5d_pct": 7.12,
+        "return_20d_pct": 7.9
+      },
+      {
+        "rank": 5,
+        "code": "BK1578",
+        "name": "其他酒类",
+        "score": 93.9949494949495,
+        "return_1d_pct": 2.74,
+        "return_5d_pct": 7.02,
+        "return_20d_pct": 11.03
+      },
+      {
+        "rank": 6,
+        "code": "BK1330",
+        "name": "模拟芯片设计",
+        "score": 92.76262626262626,
+        "return_1d_pct": 4.34,
+        "return_5d_pct": 11.04,
+        "return_20d_pct": 6.57
+      },
+      {
+        "rank": 7,
+        "code": "BK1327",
+        "name": "分立器件",
+        "score": 92.44949494949495,
+        "return_1d_pct": 4.64,
+        "return_5d_pct": 11.71,
+        "return_20d_pct": 3.6
+      },
+      {
+        "rank": 8,
+        "code": "BK1325",
+        "name": "半导体材料",
+        "score": 92.36363636363636,
+        "return_1d_pct": 3.13,
+        "return_5d_pct": 13.69,
+        "return_20d_pct": 4.71
+      }
+    ]
+  }
+}
