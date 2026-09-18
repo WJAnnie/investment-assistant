@@ -1,9 +1,12 @@
 from datetime import date
 from decimal import Decimal, InvalidOperation
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+
+from app.utils.private_storage import require_private_execution
 
 from .models import AccountConfig, HoldingConfig, PortfolioConfig
 
@@ -152,7 +155,15 @@ def parse_portfolio(data: Any, allow_unbalanced: bool = False) -> PortfolioConfi
 
 
 def load_portfolio(path: str | Path | None = None) -> PortfolioConfig:
-    """Load a portfolio YAML file, defaulting to the production configuration."""
+    """Load a portfolio from a file path, private env override, or the default file.
+
+    The PORTFOLIO_CONFIG environment override carries real account data, so it
+    is restricted to verified private execution. Public GitHub Actions runners
+    are rejected before the payload is read.
+    """
+    if path is None and (config_text := os.environ.get("PORTFOLIO_CONFIG")):
+        require_private_execution()
+        return parse_portfolio(yaml.load(config_text, Loader=_DecimalSafeLoader))
     config_path = Path(path) if path else Path(__file__).resolve().parents[2] / "config" / "portfolio.yaml"
     with config_path.open("r", encoding="utf-8") as handle:
         return parse_portfolio(yaml.load(handle, Loader=_DecimalSafeLoader))

@@ -1,9 +1,13 @@
 import unittest
 from datetime import date, datetime
 from decimal import Decimal
+import os
+from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
+
+import yaml
 
 from app.portfolio import (
     AccountConfig,
@@ -251,6 +255,52 @@ accounts:
             snapshot.exposure_by_sector["CN"] = Decimal("2")
         self.assertIsInstance(account.holdings, tuple)
         self.assertTrue(all(cls for cls in (HoldingConfig, HoldingSnapshot, AccountSnapshot, PortfolioConfig)))
+
+    def test_env_portfolio_config_loads_in_private_execution(self):
+        payload = yaml.dump({
+            "schema_version": 2,
+            "accounts": [{
+                "account_id": "A", "name": "A账户", "strategy": "long_term_core",
+                "baseline_date": "2026-09-11", "total_assets": 1000, "cash": 500,
+                "holdings": [{
+                    "code": "159500", "name": "中证500ETF", "market": "CN",
+                    "instrument_type": "etf", "valuation_mode": "exchange",
+                    "cost_price": 1.295, "baseline_value": 500,
+                    "sector": "diversified", "theme": "mid_cap",
+                }],
+            }],
+        })
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GITHUB_ACTIONS")}
+        env["PORTFOLIO_CONFIG"] = payload
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_portfolio()
+        self.assertEqual(config.schema_version, 2)
+        self.assertEqual(config.accounts[0].holdings[0].code, "159500")
+
+    def test_env_portfolio_config_rejected_on_public_github_actions(self):
+        env = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_REPOSITORY_VISIBILITY": "public",
+            "PORTFOLIO_CONFIG": "schema_version: 2",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ValueError):
+                load_portfolio()
+
+    def test_explicit_path_overrides_env_portfolio_config(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "portfolio.yaml"
+            path.write_text(yaml.dump({
+                "schema_version": 2,
+                "accounts": [{
+                    "account_id": "FILE", "name": "文件账户", "strategy": "long_term_core",
+                    "baseline_date": "2026-09-11", "total_assets": 100, "cash": 100,
+                    "holdings": [],
+                }],
+            }), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"PORTFOLIO_CONFIG": "schema_version: 2"}):
+                config = load_portfolio(path)
+            self.assertEqual(config.accounts[0].account_id, "FILE")
 
 
 if __name__ == "__main__":
