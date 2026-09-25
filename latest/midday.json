@@ -1,0 +1,250 @@
+{
+  "schema_version": "public-trial/v3",
+  "data_classification": "public_market_and_synthetic_test",
+  "purpose": "delivery_test_not_investment_advice",
+  "stage": "midday",
+  "execution_mode": "scheduled",
+  "requested_at": "2026-09-25T17:02:36.291952+08:00",
+  "generated_at": "2026-09-25T17:02:38.102639+08:00",
+  "scheduled_for": "2026-09-25T11:30:00+08:00",
+  "timing_status": "late",
+  "coverage": {
+    "global_markets": "PUBLIC_OBSERVATIONS",
+    "industry_ranking": "PUBLIC_OBSERVATIONS",
+    "morning_baseline": "MISSING",
+    "multi_timeframe": "NOT_IMPLEMENTED",
+    "prediction_pairing": "MISSING",
+    "exchange_calendar": "NOT_IMPLEMENTED"
+  },
+  "synthetic_account": {
+    "id": "SIMULATED-ONLY",
+    "positions": [
+      {
+        "symbol": "DEMO_A",
+        "weight_pct": 10
+      },
+      {
+        "symbol": "DEMO_B",
+        "weight_pct": 5
+      }
+    ],
+    "cash_pct": 85
+  },
+  "decision": {
+    "action": "WAIT",
+    "position_change_pct": 0,
+    "score": null,
+    "manual_confirmation_required": true,
+    "auto_trade_enabled": false
+  },
+  "real_account_trial_day": false,
+  "market": {
+    "source": "sina_public",
+    "status": "available_unverified",
+    "quotes": [
+      {
+        "code": "SH.000001",
+        "name": "上证指数",
+        "price": 3888.3738,
+        "change_pct": -1.22,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SZ.399001",
+        "name": "深证成指",
+        "price": 13316.97,
+        "change_pct": -2.34,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SZ.399006",
+        "name": "创业板指",
+        "price": 3288.95,
+        "change_pct": -2.68,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000688",
+        "name": "科创50",
+        "price": 1621.872,
+        "change_pct": -2.35,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000905",
+        "name": "中证500",
+        "price": 7624.0659,
+        "change_pct": -2.15,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000300",
+        "name": "沪深300",
+        "price": 4439.1443,
+        "change_pct": -1.73,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SH.000016",
+        "name": "上证50",
+        "price": 2842.7427,
+        "change_pct": -1.42,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      },
+      {
+        "code": "SZ.399005",
+        "name": "中小100",
+        "price": 8180.35,
+        "change_pct": -2.39,
+        "source_as_of": null,
+        "freshness": "UNKNOWN",
+        "error_code": null
+      }
+    ]
+  },
+  "global_market": {
+    "status": "not_collected",
+    "quotes": [
+      {
+        "category": "us_equities",
+        "symbol": "^GSPC",
+        "name": "标普500",
+        "value": null,
+        "previous_value": null,
+        "value_unit": "points",
+        "change": null,
+        "change_unit": "pct",
+        "source": null,
+        "source_as_of": null,
+        "session_date": null,
+        "freshness": null,
+        "error_code": "NOT_COLLECTED_FOR_STAGE"
+      },
+      {
+        "category": "us_equities",
+        "symbol": "^DJI",
+        "name": "道琼斯工业指数",
+        "value": null,
+        "previous_value": null,
+        "value_unit": "points",
+        "change": null,
+        "change_unit": "pct",
+        "source": null,
+        "source_as_of": null,
+        "session_date": null,
+        "freshness": null,
+        "error_code": "NOT_COLLECTED_FOR_STAGE"
+      },
+      {
+        "category": "nasdaq",
+        "symbol": "^IXIC",
+        "name": "纳斯达克综合指数",
+        "value": null,
+        "previous_value": null,
+        "value_unit": "points",
+        "change": null,
+        "change_unit": "pct",
+        "source": null,
+        "source_as_of": null,
+        "session_date": null,
+        "freshness": null,
+        "error_code": "NOT_COLLECTED_FOR_STAGE"
+      },
+      {
+        "category": "semiconductors",
+        "symbol": "^SOX",
+        "name": "费城半导体指数",
+        "value": null,
+        "previous_value": null,
+        "value_unit": "points",
+        "change": null,
+        "change_unit": "pct",
+        "source": null,
+        "source_as_of": null,
+        "session_date": null,
+        "freshness": null,
+        "error_code": "NOT_COLLECTED_FOR_STAGE"
+      },
+      {
+        "category": "us_treasury",
+        "symbol": "^TNX",
+        "name": "美国10年期国债收益率",
+        "value": null,
+        "previous_value": null,
+        "value_unit": "percent",
+        "change": null,
+        "change_unit": "bp",
+        "source": null,
+        "source_as_of": null,
+        "session_date": null,
+        "freshness": null,
+        "error_code": "NOT_COLLECTED_FOR_STAGE"
+      },
+      {
+        "category": "usd",
+        "symbol": "DX-Y.NYB",
+        "name": "美元指数",
+        "value": null,
+        "previous_value": null,
+        "value_unit": "points",
+        "change": null,
+        "change_unit": "pct",
+        "source": null,
+        "source_as_of": null,
+        "session_date": null,
+        "freshness": null,
+        "error_code": "NOT_COLLECTED_FOR_STAGE"
+      },
+      {
+        "category": "gold",
+        "symbol": "GC=F",
+        "name": "COMEX黄金",
+        "value": null,
+        "previous_value": null,
+        "value_unit": "usd_per_ounce",
+        "change": null,
+        "change_unit": "pct",
+        "source": null,
+        "source_as_of": null,
+        "session_date": null,
+        "freshness": null,
+        "error_code": "NOT_COLLECTED_FOR_STAGE"
+      },
+      {
+        "category": "oil",
+        "symbol": "CL=F",
+        "name": "WTI原油",
+        "value": null,
+        "previous_value": null,
+        "value_unit": "usd_per_barrel",
+        "change": null,
+        "change_unit": "pct",
+        "source": null,
+        "source_as_of": null,
+        "session_date": null,
+        "freshness": null,
+        "error_code": "NOT_COLLECTED_FOR_STAGE"
+      }
+    ]
+  },
+  "industries": {
+    "status": "NOT_COLLECTED_FOR_STAGE",
+    "as_of": null,
+    "error": null,
+    "items": []
+  }
+}
